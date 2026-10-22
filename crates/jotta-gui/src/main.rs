@@ -272,7 +272,7 @@ fn build_ui(app: &adw::Application) {
         window,
         move |_| {
             let dialog = gtk::FileDialog::new();
-            dialog.set_title(Some("Vælg mappe til backup"));
+            dialog.set_title("Vælg mappe til backup");
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Tilføj"));
             let toast_tx_add = toast_tx_add.clone();
@@ -887,13 +887,13 @@ fn open_backup_ignores_dialog(
         let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<String>>();
         let data_rx = Arc::new(Mutex::new(data_rx));
         let patterns_list = patterns_list.clone();
-        let backup_name = backup_name.to_string();
+        let backup_name_idle = backup_name.to_string();
         let toast_tx = toast_tx.clone();
         glib::idle_add_local(move || {
             let rx = data_rx.lock().unwrap();
             match rx.try_recv() {
                 Ok(patterns) => {
-                    rebuild_backup_ignores_list(&patterns_list, &patterns, &backup_name, &toast_tx);
+                    rebuild_backup_ignores_list(&patterns_list, &patterns, &backup_name_idle, &toast_tx);
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
