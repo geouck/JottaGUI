@@ -20,6 +20,7 @@ impl Value {
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Object(map) => map.get(key),
+            Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
             _ => None,
         }
     }
