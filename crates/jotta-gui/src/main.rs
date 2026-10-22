@@ -184,10 +184,9 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toast_overlay));
 
     // --- Wire handlers ---
-    pause_switch.connect_state_set(clone!(
-        #[weak]
-        toast_overlay,
-        move |_sw, state| {
+    {
+        let toast_overlay = toast_overlay.clone();
+        pause_switch.connect_state_set(move |_sw, state| {
             let cmd = if state {
                 JottaCommand::Resume
             } else {
@@ -195,6 +194,7 @@ fn build_ui(app: &adw::Application) {
             };
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
+                let toast_overlay = toast_overlay.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = client.run(&cmd) {
                         glib::idle_add_local_once(move || {
@@ -204,19 +204,15 @@ fn build_ui(app: &adw::Application) {
                 });
             }
             Propagation::Proceed
-        },
-    ));
+        });
+    }
 
     // Sync switch: ON = sync running (SyncStart), OFF = stopped (SyncStop).
     // Destructive: stopping sync is confirmed (safety rule 3).
-    sync_switch.connect_state_set(clone!(
-        #[weak]
-        window,
-        #[weak]
-        toast_overlay,
-        #[weak]
-        sync_switch,
-        move |sw, state| {
+    {
+        let window = window.clone();
+        let sync_switch = sync_switch.clone();
+        sync_switch.connect_state_set(move |sw, state| {
             if !state {
                 // Turning OFF: confirm before stopping sync.
                 let dialog = adw::AlertDialog::new(
@@ -229,6 +225,7 @@ fn build_ui(app: &adw::Application) {
                 dialog.set_default_response(Some("cancel"));
                 dialog.set_close_response("cancel");
                 let sw2 = sw.clone();
+                let window = window.clone();
                 dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
                     if resp == "stop" {
                         run_cli(JottaCommand::SyncStop);
@@ -241,8 +238,8 @@ fn build_ui(app: &adw::Application) {
             }
             run_cli(JottaCommand::SyncStart);
             Propagation::Proceed
-        },
-    ));
+        });
+    }
 
     // "Tilføj mappe" button → FileDialog → BackupAdd.
     let add_btn = gtk::Button::with_label("Tilføj mappe…");
