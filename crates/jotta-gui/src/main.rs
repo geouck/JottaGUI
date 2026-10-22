@@ -8,8 +8,10 @@
 //!
 //! The GUI never calls jotta-cli itself except through jotta-core types.
 
+use gtk::glib::clone;
 use gtk::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 
 fn main() {
     adw::init().expect("failed to init libadwaita");
@@ -19,7 +21,7 @@ fn main() {
         .build();
 
     app.connect_activate(build_ui);
-    std::process::exit(app.run());
+    std::process::exit(app.run().into());
 }
 
 fn build_ui(app: &adw::Application) {
@@ -45,11 +47,14 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&placeholder("Ignore-mønstre"), Some("ignores"), "Ignore-mønstre");
     stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
 
-    sidebar.connect_row_selected(clone!(@strong stack => move |_, row| {
-        if let Some(row) = row {
-            if let Some(child) = row.child() {
-                if let Some(label) = child.downcast_ref::<gtk::Label>() {
-                    if let Some(title) = label.text().as_deref().map(|s| s.to_string()) {
+    sidebar.connect_row_selected(clone!(
+        #[strong]
+        stack,
+        move |_, row| {
+            if let Some(row) = row {
+                if let Some(child) = row.child() {
+                    if let Some(label) = child.downcast_ref::<gtk::Label>() {
+                        let title = label.text().to_string();
                         let page = match title.as_str() {
                             "Status" => Some("status"),
                             "Backup" => Some("backup"),
@@ -64,23 +69,24 @@ fn build_ui(app: &adw::Application) {
                     }
                 }
             }
-        }
-    }));
+        },
+    ));
 
-    let leaflet = adw::Leaflet::new();
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
     sidebar.set_margin_top(12);
     sidebar.set_margin_bottom(12);
     sidebar.set_margin_start(12);
     sidebar.set_margin_end(12);
     sidebar_box.append(&sidebar);
-    let sep1 = gtk::Separator::new(gtk::Orientation::Vertical);
-    leaflet.append(&sidebar_box);
-    leaflet.append(&sep1);
-    leaflet.append(&stack);
-    leaflet.set_visible_child(&stack);
 
-    window.set_content(Some(&leaflet));
+    let sidebar_page = adw::NavigationPage::new(&sidebar_box, "Jotta Desktop");
+    let content_page = adw::NavigationPage::new(&stack, "Status");
+
+    let split_view = adw::NavigationSplitView::new();
+    split_view.set_sidebar(Some(&sidebar_page));
+    split_view.set_content(Some(&content_page));
+
+    window.set_content(Some(&split_view));
     window.present();
 }
 
@@ -94,9 +100,16 @@ fn placeholder(title: &str) -> gtk::Widget {
     label.upcast()
 }
 
+fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
+    widget.set_margin_top(margin);
+    widget.set_margin_bottom(margin);
+    widget.set_margin_start(margin);
+    widget.set_margin_end(margin);
+}
+
 fn status_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    box_.set_margin_all(24);
+    set_margin_all(&box_, 24);
 
     let title = gtk::Label::new(None);
     title.set_markup("<span size='xx-large' weight='bold'>Status</span>");
@@ -105,9 +118,9 @@ fn status_page() -> gtk::Widget {
     // Usage bar (5 TB plan).
     let used = 850_000_000_000u64;
     let quota = 5_000_000_000_000u64;
-    let level = adw::LevelBar::builder()
-        .min(0.0)
-        .max(quota as f64)
+    let level = gtk::LevelBar::builder()
+        .min_value(0.0)
+        .max_value(quota as f64)
         .value(used as f64)
         .valign(gtk::Align::Start)
         .build();
@@ -124,7 +137,7 @@ fn status_page() -> gtk::Widget {
 
 fn backup_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_all(24);
+    set_margin_all(&box_, 24);
 
     let scrolled = gtk::ScrolledWindow::new();
     let list = gtk::ListBox::new();
@@ -149,7 +162,7 @@ fn backup_page() -> gtk::Widget {
 
 fn sync_page() -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    box_.set_margin_all(24);
+    set_margin_all(&box_, 24);
 
     let group = adw::PreferencesGroup::new();
     let row = adw::ActionRow::builder()
