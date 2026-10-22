@@ -451,7 +451,7 @@ fn build_ui(app: &adw::Application) {
         move |_, row| {
             if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
                 let name = action_row.title().to_string();
-                let is_dir = action_row.subtitle().starts_with("Mappe");
+                let is_dir = action_row.subtitle().map(|s| s.starts_with("Mappe")).unwrap_or(false);
                 if is_dir {
                     let new_path = if restore_current_path.borrow().is_empty() {
                         name.clone()
@@ -1531,7 +1531,7 @@ fn build_restore_page(
     let downloads_title = gtk::Label::new(Some("Downloads"));
     downloads_title.set_halign(gtk::Align::Start);
     downloads_title.add_css_class("heading");
-    downloads_group.add(&downloads_list);
+    downloads_group.add(downloads_list);
     box_.append(downloads_group);
 
     // Trash section
@@ -1695,8 +1695,23 @@ fn rebuild_trash_list(
         let path = entry.path.clone();
         let list = list.clone();
         restore_btn.connect_clicked(move |_| {
+            // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
+            let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
+            let refresh_rx = Arc::new(Mutex::new(refresh_rx));
+            let list_r = list.clone();
+            glib::idle_add_local(move || {
+                let rx = refresh_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(entries) => {
+                        rebuild_trash_list(&list_r, &entries);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+
             let path = path.clone();
-            let list = list.clone();
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
@@ -1707,9 +1722,7 @@ fn rebuild_trash_list(
                     let client = CliClient::new(loc);
                     if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
                         let entries = jotta_core::remote::parse_trash(&text);
-                        glib::idle_add_local_once(move || {
-                            rebuild_trash_list(&list, &entries);
-                        });
+                        let _ = refresh_tx.send(entries);
                     }
                 }
             });
@@ -1741,8 +1754,23 @@ fn rebuild_trash_list(
             let root = list.root();
             confirm.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
                 if resp == "purge" {
+                    // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
+                    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
+                    let refresh_rx = Arc::new(Mutex::new(refresh_rx));
+                    let list_r = list.clone();
+                    glib::idle_add_local(move || {
+                        let rx = refresh_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(entries) => {
+                                rebuild_trash_list(&list_r, &entries);
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+
                     let path = path.clone();
-                    let list = list.clone();
                     std::thread::spawn(move || {
                         if let Some(loc) = BinaryLocator::from_path() {
                             let client = CliClient::new(loc);
@@ -1753,9 +1781,7 @@ fn rebuild_trash_list(
                             let client = CliClient::new(loc);
                             if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
                                 let entries = jotta_core::remote::parse_trash(&text);
-                                glib::idle_add_local_once(move || {
-                                    rebuild_trash_list(&list, &entries);
-                                });
+                                let _ = refresh_tx.send(entries);
                             }
                         }
                     });
