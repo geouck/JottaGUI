@@ -31,6 +31,12 @@ pub struct Status {
     pub sync: Option<SyncInfo>,
     /// Best-effort state machine for the tray icon.
     pub state: State,
+    /// Device name (from `User.device.Name`) — used to build remote paths
+    /// like `Backup/<device_name>/<backup_name>` for `jotta-cli download`.
+    pub device_name: Option<String>,
+    /// Whether a restore/download is currently in progress
+    /// (from `State.RestoreWorking`).
+    pub restore_working: bool,
 }
 
 /// One backup folder entry (from `Backup.State.Enabled.Backups[]`).
@@ -166,6 +172,20 @@ impl Status {
             });
         }
 
+        // Device name (verified schema: User.device.Name) — used for remote paths.
+        s.device_name = v
+            .path(&["User", "device", "Name"])
+            .or_else(|| v.path(&["User", "Device", "Name"]))
+            .or_else(|| v.path(&["device", "name"]))
+            .and_then(|x| x.as_str())
+            .map(str::to_owned);
+
+        // RestoreWorking (verified schema: State.RestoreWorking is a bool).
+        s.restore_working = v
+            .path(&["State", "RestoreWorking"])
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+
         s.state = s.compute_state();
         s
     }
@@ -230,6 +250,10 @@ mod tests {
     const REAL_SCHEMA: &str = r#"{
         "User": {
             "Email": "eske@tuta.io",
+            "device": {
+                "Name": "Laptop",
+                "Type": 12
+            },
             "AccountInfo": {
                 "Capacity": 5000000000000,
                 "Usage": 16993271698
@@ -295,6 +319,14 @@ mod tests {
         assert_eq!(sync.root_path.as_deref(), Some("/home/eske/Documents"));
         assert_eq!(sync.files, Some(31927));
         assert_eq!(sync.bytes, Some(9_126_400_809));
+    }
+
+    #[test]
+    fn parses_device_name_and_restore_working_from_real_schema() {
+        let v = json::parse(REAL_SCHEMA).unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.device_name.as_deref(), Some("Laptop"));
+        assert!(s.restore_working);
     }
 
     #[test]

@@ -79,8 +79,10 @@ The tray icon switches between 5 named icons based on daemon status:
 - [x] Status parser verified against real `jotta-cli status --json` output
 - [x] Icon theme: 5 state icons + app icon + symbolic, all hicolor sizes
 - [x] Desktop entries + AppStream metainfo
-- [ ] GUI: ignore-pattern editor (roadmap item 3 remainder)
-- [ ] Restore/download flow (`jotta-cli download`)
+- [x] GUI: sync selective (checkbox dialog, non-destructive) + backup ignores
+      (per-backup "Udeluk…" dialog, destructive warning on add)
+- [x] Restore/download flow: remote browser (Backup/Archive/Sync), download
+      dialog, downloads list (abort/retry), trash viewer (restore/purge)
 - [ ] Flathub manifest finalized + jotta-cli bundling (needs Jottacloud's OK)
 
 ## License
