@@ -154,7 +154,23 @@ fn build_ui(app: &adw::Application) {
     let sync_page = build_sync_page(&sync_group);
     stack.add_titled(&sync_page, Some("sync"), "Sync");
 
-    stack.add_titled(&placeholder("Ignore-mønstre"), Some("ignores"), "Ignore-mønstre");
+    // --- Ignores page ---
+    let ignores_banner = adw::Banner::new("");
+    ignores_banner.set_revealed(false);
+    let ignores_list = gtk::ListBox::new();
+    ignores_list.add_css_class("boxed-list");
+    let ignores_entry = adw::EntryRow::builder()
+        .title("Nyt mønster")
+        .show_apply_button(true)
+        .build();
+    let ignores_group = adw::PreferencesGroup::builder()
+        .title("Ignorerede mønstre")
+        .description("Gitignore-stil mønstre.ADVARSEL: Tilføjelse af et mønster fjerner allerede-backup'ede matchende filer (de går til papirkurven).")
+        .build();
+    ignores_group.add(&ignores_entry);
+    let ignores_page = build_ignores_page(&ignores_banner, &ignores_group, &ignores_list);
+    stack.add_titled(&ignores_page, Some("ignores"), "Ignore-mønstre");
+
     stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
@@ -280,6 +296,77 @@ fn build_ui(app: &adw::Application) {
     ));
     // Replace the placeholder button on the backup page with the wired one.
     replace_add_button(&backup_page, &add_btn);
+
+    // --- Ignores page handlers ---
+    // Apply button on the EntryRow -> confirm -> IgnoreAdd (safety rule 3:
+    // adding a pattern removes already-backed-up matching files to Trash).
+    ignores_entry.connect_apply(move |entry| {
+        let pattern = entry.text().to_string();
+        if pattern.trim().is_empty() {
+            return;
+        }
+        let pattern = pattern.trim().to_string();
+        let entry = entry.clone();
+        let dialog = adw::AlertDialog::new(
+            Some("Tilføj ignore-mønster?"),
+            Some(&format!(
+                "Mønsteret `{pattern}` tilføjes. Allerede backup'ede filer der matcher mønsteret, fjernes fra backup og flyttes til papirkurven."
+            )),
+        );
+        dialog.add_response("cancel", "Annuller");
+        dialog.add_response("add", "Tilføj mønster");
+        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let toast_tx = toast_tx.clone();
+        let ignores_list = ignores_list.clone();
+        let parent = entry.root();
+        dialog.choose(&parent.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
+            if resp == "add" {
+                let toast_tx = toast_tx.clone();
+                let ignores_list = ignores_list.clone();
+                let pattern = pattern.clone();
+                std::thread::spawn(move || {
+                    if let Some(loc) = BinaryLocator::from_path() {
+                        let client = CliClient::new(loc);
+                        match client.run(&JottaCommand::IgnoreAdd { pattern: pattern.clone(), backup: None }) {
+                            Ok(_) => {
+                                let tx = toast_tx.clone();
+                                let _ = tx.send(format!("Mønster tilføjet: {pattern}"));
+                                // Refresh the ignores list.
+                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList) {
+                                    let patterns = parse_ignores(&v);
+                                    glib::idle_add_local_once(move || {
+                                        rebuild_ignores_list(&ignores_list, &patterns);
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                let _ = toast_tx.send(format!("Kunne ikke tilføje mønster: {e}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        entry.set_text("");
+    });
+
+    // Initial load of ignores list (async, applied on main loop).
+    {
+        let ignores_list = ignores_list.clone();
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList) {
+                    let patterns = parse_ignores(&v);
+                    glib::idle_add_local_once(move || {
+                        rebuild_ignores_list(&ignores_list, &patterns);
+                    });
+                }
+            }
+        });
+    }
 
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
@@ -524,6 +611,116 @@ fn placeholder(title: &str) -> gtk::Widget {
     let label = gtk::Label::new(Some(&format!("{title} — under udvikling")));
     label.set_vexpand(true);
     label.upcast()
+}
+
+fn build_ignores_page(
+    banner: &adw::Banner,
+    group: &adw::PreferencesGroup,
+    list: &gtk::ListBox,
+) -> gtk::Widget {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_, 24);
+    box_.append(banner);
+    box_.append(group);
+
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(list));
+    scrolled.set_vexpand(true);
+    box_.append(&scrolled);
+    box_.upcast()
+}
+
+/// Extract ignore patterns from `jotta-cli ignores --json` output.
+/// The schema is not documented; we tolerate several shapes:
+/// - ["pattern1", "pattern2"]                       (array of strings)
+/// - {"patterns": ["p1", "p2"]}                    (object with array)
+/// - [{"pattern": "p1"}, {"pattern": "p2"}]        (array of objects)
+/// - {"Patterns": [{"Pattern": "p1"}]}             (capitalized variant)
+fn parse_ignores(v: &jotta_core::json::Value) -> Vec<String> {
+    use jotta_core::json::Value;
+    fn strs_from_array(arr: &[Value]) -> Vec<String> {
+        arr.iter()
+            .filter_map(|item| match item {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => item
+                    .path(&["pattern"])
+                    .or_else(|| item.path(&["Pattern"]))
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    }
+    match v {
+        Value::Array(arr) => strs_from_array(arr),
+        Value::Object(_) => v
+            .path(&["patterns"])
+            .or_else(|| v.path(&["Patterns"]))
+            .and_then(|x| x.as_array())
+            .map(strs_from_array)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn rebuild_ignores_list(list: &gtk::ListBox, patterns: &[String]) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    if patterns.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen ignore-mønstre")
+            .subtitle("Tilføj et mønster ovenfor for at udelukke filer fra backup")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for pattern in patterns {
+        let row = adw::ActionRow::builder().title(pattern).build();
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        remove_btn.set_tooltip_text(Some("Fjern mønster"));
+        let pattern = pattern.clone();
+        let list = list.clone();
+        remove_btn.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(
+                Some("Fjern ignore-mønster?"),
+                Some(&format!("Mønsteret `{pattern}` fjernes. Filer der matcher igen bliver backet up ved næste scan.")),
+            );
+            dialog.add_response("cancel", "Annuller");
+            dialog.add_response("remove", "Fjern");
+            dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let pattern = pattern.clone();
+            let list = list.clone();
+            let parent = dialog.root();
+            let _ = &parent;
+            // Use the list's root window as parent.
+            let root = list.root();
+            dialog.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
+                if resp == "remove" {
+                    let pattern = pattern.clone();
+                    let list = list.clone();
+                    std::thread::spawn(move || {
+                        if let Some(loc) = BinaryLocator::from_path() {
+                            let client = CliClient::new(loc);
+                            let _ = client.run(&JottaCommand::IgnoreRemove { pattern: pattern.clone(), backup: None });
+                            if let Ok(v) = client.run_json(&JottaCommand::IgnoresList) {
+                                let patterns = parse_ignores(&v);
+                                glib::idle_add_local_once(move || {
+                                    rebuild_ignores_list(&list, &patterns);
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        row.add_suffix(&remove_btn);
+        list.append(&row);
+    }
 }
 
 fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
