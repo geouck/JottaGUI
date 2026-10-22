@@ -229,7 +229,7 @@ fn build_ui(app: &adw::Application) {
                 dialog.set_default_response(Some("cancel"));
                 dialog.set_close_response("cancel");
                 let sw2 = sw.clone();
-                dialog.choose(&window, None::<&gtk::Cancellable>, move |resp| {
+                dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
                     if resp == "stop" {
                         run_cli(JottaCommand::SyncStop);
                     } else {
@@ -247,7 +247,6 @@ fn build_ui(app: &adw::Application) {
     // "Tilføj mappe" button → FileDialog → BackupAdd.
     let add_btn = gtk::Button::with_label("Tilføj mappe…");
     add_btn.add_css_class("suggested-action");
-    add_btn.set_name("add-folder-btn");
     add_btn.connect_clicked(clone!(
         #[weak]
         window,
@@ -258,7 +257,7 @@ fn build_ui(app: &adw::Application) {
             dialog.set_title("Vælg mappe til backup");
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Tilføj"));
-            dialog.select_folder(Some(&window), None::<&gtk::Cancellable>, move |res| {
+            dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(file) => {
                         if let Some(path) = file.path() {
