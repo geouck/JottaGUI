@@ -62,7 +62,8 @@ fn main() {
         .build();
 
     app.connect_activate(build_ui);
-    std::process::exit(app.run().into());
+    let code: i32 = app.run().into();
+    std::process::exit(code);
 }
 
 fn build_ui(app: &adw::Application) {
@@ -77,6 +78,21 @@ fn build_ui(app: &adw::Application) {
 
     // Toast overlay for command feedback.
     let toast_overlay = adw::ToastOverlay::new();
+
+    // Channel from worker threads -> main loop for toast messages.
+    // Only String crosses the thread boundary; the toast is created on the main thread.
+    let (toast_tx, toast_rx) = std::sync::mpsc::channel::<String>();
+    {
+        let toast_overlay = toast_overlay.clone();
+        let toast_rx = std::sync::Mutex::new(toast_rx);
+        glib::idle_add_local(move || {
+            let mut rx = toast_rx.lock().unwrap();
+            while let Ok(msg) = rx.try_recv() {
+                toast_overlay.add_toast(adw::Toast::new(&msg));
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
@@ -184,28 +200,23 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toast_overlay));
 
     // --- Wire handlers ---
-    {
-        let toast_overlay = toast_overlay.clone();
-        pause_switch.connect_state_set(move |_sw, state| {
-            let cmd = if state {
-                JottaCommand::Resume
-            } else {
-                JottaCommand::Pause
-            };
-            if let Some(loc) = BinaryLocator::from_path() {
-                let client = CliClient::new(loc);
-                let toast_overlay = toast_overlay.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = client.run(&cmd) {
-                        glib::idle_add_local_once(move || {
-                            toast_overlay.add_toast(adw::Toast::new(&format!("Kunne ikke ændre pause: {e}")));
-                        });
-                    }
-                });
-            }
-            Propagation::Proceed
-        });
-    }
+    pause_switch.connect_state_set(move |_sw, state| {
+        let cmd = if state {
+            JottaCommand::Resume
+        } else {
+            JottaCommand::Pause
+        };
+        if let Some(loc) = BinaryLocator::from_path() {
+            let client = CliClient::new(loc);
+            let tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = client.run(&cmd) {
+                    let _ = tx.send(format!("Kunne ikke ændre pause: {e}"));
+                }
+            });
+        }
+        Propagation::Proceed
+    });
 
     // Sync switch: ON = sync running (SyncStart), OFF = stopped (SyncStop).
     // Destructive: stopping sync is confirmed (safety rule 3).
@@ -247,21 +258,18 @@ fn build_ui(app: &adw::Application) {
     add_btn.connect_clicked(clone!(
         #[weak]
         window,
-        #[weak]
-        toast_overlay,
         move |_| {
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Vælg mappe til backup");
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Tilføj"));
+            let toast_tx = toast_tx.clone();
             dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(file) => {
                         if let Some(path) = file.path() {
                             run_cli(JottaCommand::BackupAdd(path));
-                            glib::idle_add_local_once(move || {
-                                toast_overlay.add_toast(adw::Toast::new("Backup-mappe tilføjet"));
-                            });
+                            let _ = toast_tx.send("Backup-mappe tilføjet".to_string());
                         }
                     }
                     Err(_) => {} // user cancelled
@@ -275,7 +283,7 @@ fn build_ui(app: &adw::Application) {
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
-    let ui = StatusWidgets {
+    let ui = Arc::new(StatusWidgets {
         state_label: status_state_label.clone(),
         email_label: status_email_label.clone(),
         level: status_level.clone(),
@@ -285,7 +293,7 @@ fn build_ui(app: &adw::Application) {
         sync_switch: sync_switch.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
-    };
+    });
     std::thread::spawn(move || loop {
         let status = match poll_client.status() {
             Ok(v) => Status::from_json(&v),
@@ -295,9 +303,12 @@ fn build_ui(app: &adw::Application) {
             let mut guard = poll_status.lock().unwrap();
             *guard = status.clone();
         }
-        let ui = ui.clone();
+        let update = UiUpdate {
+            status: status.clone(),
+            widgets: Arc::clone(&ui),
+        };
         glib::idle_add_local_once(move || {
-            ui.apply(&status);
+            update.widgets.apply(&update.status);
         });
         std::thread::sleep(Duration::from_secs(3));
     });
@@ -308,7 +319,7 @@ fn build_ui(app: &adw::Application) {
         let mut guard = core.status.lock().unwrap();
         *guard = initial.clone();
     }
-    ui_apply_initial(&status_state_label, &status_email_label, &status_level, &status_usage_label, &pause_switch, &backup_list, &sync_switch, &sync_path_row, &sync_count_row, &initial);
+    ui.apply(&initial);
 
     window.present();
 }
@@ -325,18 +336,16 @@ struct StatusWidgets {
     sync_count_row: adw::ActionRow,
 }
 
-impl Clone for StatusWidgets {
+struct UiUpdate {
+    status: Status,
+    widgets: Arc<StatusWidgets>,
+}
+
+impl Clone for UiUpdate {
     fn clone(&self) -> Self {
-        StatusWidgets {
-            state_label: self.state_label.clone(),
-            email_label: self.email_label.clone(),
-            level: self.level.clone(),
-            usage_label: self.usage_label.clone(),
-            pause_switch: self.pause_switch.clone(),
-            backup_list: self.backup_list.clone(),
-            sync_switch: self.sync_switch.clone(),
-            sync_path_row: self.sync_path_row.clone(),
-            sync_count_row: self.sync_count_row.clone(),
+        UiUpdate {
+            status: self.status.clone(),
+            widgets: Arc::clone(&self.widgets),
         }
     }
 }
@@ -526,29 +535,4 @@ fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
     widget.set_margin_end(margin);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ui_apply_initial(
-    state_label: &gtk::Label,
-    email_label: &gtk::Label,
-    level: &gtk::LevelBar,
-    usage_label: &gtk::Label,
-    pause_switch: &gtk::Switch,
-    backup_list: &gtk::ListBox,
-    sync_switch: &gtk::Switch,
-    sync_path_row: &adw::ActionRow,
-    sync_count_row: &adw::ActionRow,
-    status: &Status,
-) {
-    let widgets = StatusWidgets {
-        state_label: state_label.clone(),
-        email_label: email_label.clone(),
-        level: level.clone(),
-        usage_label: usage_label.clone(),
-        pause_switch: pause_switch.clone(),
-        backup_list: backup_list.clone(),
-        sync_switch: sync_switch.clone(),
-        sync_path_row: sync_path_row.clone(),
-        sync_count_row: sync_count_row.clone(),
-    };
-    widgets.apply(status);
-}
+
