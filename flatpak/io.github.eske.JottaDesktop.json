@@ -18,7 +18,12 @@
       "build-commands": [
         "cargo build --release --offline -p jotta-gui -p jotta-tray",
         "install -Dm755 target/release/jotta-desktop /app/bin/jotta-desktop",
-        "install -Dm755 target/release/jotta-tray /app/bin/jotta-tray"
+        "install -Dm755 target/release/jotta-tray /app/bin/jotta-tray",
+        "install -Dm644 data/jotta-desktop.desktop /app/share/applications/jotta-desktop.desktop",
+        "install -Dm644 data/autostart/jotta-tray.desktop /app/share/applications/jotta-tray.desktop",
+        "install -Dm644 data/io.github.eske.JottaDesktop.metainfo.xml /app/share/metainfo/io.github.eske.JottaDesktop.metainfo.xml",
+        "cp -r data/icons/hicolor /app/share/icons/",
+        "gtk-update-icon-cache -f -t /app/share/icons/hicolor || true"
       ],
       "sources": [
         {

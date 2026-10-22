@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Jotta Desktop (tray)
+GenericName=Jottacloud Tray Icon
+Comment=StatusNotifierItem tray icon for Jottacloud (autostart)
+Exec=jotta-tray
+Icon=jotta-desktop
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=jottacloud;cloud;backup;sync;storage;tray;
+StartupNotify=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

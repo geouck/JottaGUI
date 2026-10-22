@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Jotta Desktop
+GenericName=Jottacloud Client
+Comment=Desktop client for Jottacloud (backup, sync, tray)
+Exec=jotta-desktop
+Icon=jotta-desktop
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=jottacloud;cloud;backup;sync;storage;
+StartupNotify=true
+StartupWMClass=jotta-desktop

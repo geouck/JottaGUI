@@ -49,6 +49,20 @@ impl Tray for JottaTray {
         Self::icon_for(self.state.lock().unwrap().status.state).to_string()
     }
 
+    fn icon_theme_path(&self) -> String {
+        // Bundled hicolor dir next to the binary (Flatpak: /app/share/icons).
+        // Falls back to the system theme if the icons are not found there.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let bundled = dir.join("../share/icons/hicolor");
+                if bundled.is_dir() {
+                    return bundled.display().to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
     fn title(&self) -> String {
         "Jotta Desktop".into()
     }

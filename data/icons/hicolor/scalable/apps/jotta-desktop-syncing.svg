@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jotta Desktop — syncing: cloud with an animated-feel up/down arrow. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <path fill="#3d7bd9" d="M14 34a9 9 0 0 1-1.2-17.9A13 13 0 0 1 38 20.5 8.5 8.5 0 0 1 36.5 34H14z"/>
+  <path fill="#ffffff" d="M24 18l6 7h-4v6h-4v-6h-4z"/>
+</svg>
