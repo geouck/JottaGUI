@@ -266,21 +266,22 @@ fn build_ui(app: &adw::Application) {
     // "Tilføj mappe" button → FileDialog → BackupAdd.
     let add_btn = gtk::Button::with_label("Tilføj mappe…");
     add_btn.add_css_class("suggested-action");
+    let toast_tx_add = toast_tx.clone();
     add_btn.connect_clicked(clone!(
         #[weak]
         window,
         move |_| {
             let dialog = gtk::FileDialog::new();
-            dialog.set_title("Vælg mappe til backup");
+            dialog.set_title(Some("Vælg mappe til backup"));
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Tilføj"));
-            let toast_tx = toast_tx.clone();
+            let toast_tx_add = toast_tx_add.clone();
             dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(file) => {
                         if let Some(path) = file.path() {
                             run_cli(JottaCommand::BackupAdd(path));
-                            let _ = toast_tx.send("Backup-mappe tilføjet".to_string());
+                            let _ = toast_tx_add.send("Backup-mappe tilføjet".to_string());
                         }
                     }
                     Err(_) => {} // user cancelled
@@ -294,11 +295,12 @@ fn build_ui(app: &adw::Application) {
     // --- Sync selective: "Vælg mapper at synkronisere" checkbox dialog ---
     // NOT destructive (unlike backup ignores) — no confirmation dialog.
     // Matches the official Jottacloud app's "Choose folders to synchronize".
+    let toast_tx_sel = toast_tx.clone();
     sync_selective_btn.connect_clicked(clone!(
         #[weak]
         window,
         move |_| {
-            open_sync_selective_dialog(&window, &toast_tx);
+            open_sync_selective_dialog(&window, &toast_tx_sel);
         },
     ));
 
@@ -711,7 +713,7 @@ fn build_sync_selective_dialog(
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
     let dialog = gtk::Dialog::new();
-    dialog.set_title("Vælg mapper at synkronisere");
+    dialog.set_title(Some("Vælg mapper at synkronisere"));
     dialog.set_transient_for(Some(parent));
     dialog.set_modal(true);
     dialog.set_default_width(420);
@@ -824,7 +826,7 @@ fn open_backup_ignores_dialog(
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
     let dialog = gtk::Dialog::new();
-    dialog.set_title(&format!("Udeluk fra backup: {backup_name}"));
+    dialog.set_title(Some(&format!("Udeluk fra backup: {backup_name}")));
     dialog.set_transient_for(Some(window));
     dialog.set_modal(true);
     dialog.set_default_width(480);
@@ -1029,8 +1031,8 @@ fn rebuild_backup_ignores_list(
         remove_btn.set_tooltip_text(Some("Fjern mønster"));
         let pattern = pattern.to_string();
         let backup_name = backup_name.to_string();
-        let toast_tx = toast_tx.clone();
-        let list = list.clone();
+        let toast_tx_remove = toast_tx.clone();
+        let list_remove = list.clone();
         remove_btn.connect_clicked(move |_| {
             let confirm = adw::AlertDialog::new(
                 Some("Fjern udelukkelsesmønster?"),
@@ -1045,8 +1047,8 @@ fn rebuild_backup_ignores_list(
             confirm.set_close_response("cancel");
             let pattern = pattern.clone();
             let backup_name = backup_name.clone();
-            let toast_tx = toast_tx.clone();
-            let list = list.clone();
+            let toast_tx = toast_tx_remove.clone();
+            let list = list_remove.clone();
             let root = list.root();
             confirm.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
                 if resp == "remove" {
