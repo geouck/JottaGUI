@@ -86,7 +86,7 @@ fn build_ui(app: &adw::Application) {
         let toast_overlay = toast_overlay.clone();
         let toast_rx = std::sync::Mutex::new(toast_rx);
         glib::idle_add_local(move || {
-            let mut rx = toast_rx.lock().unwrap();
+            let rx = toast_rx.lock().unwrap();
             while let Ok(msg) = rx.try_recv() {
                 toast_overlay.add_toast(adw::Toast::new(&msg));
             }
@@ -200,6 +200,7 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toast_overlay));
 
     // --- Wire handlers ---
+    let toast_tx_pause = toast_tx.clone();
     pause_switch.connect_state_set(move |_sw, state| {
         let cmd = if state {
             JottaCommand::Resume
@@ -208,7 +209,7 @@ fn build_ui(app: &adw::Application) {
         };
         if let Some(loc) = BinaryLocator::from_path() {
             let client = CliClient::new(loc);
-            let tx = toast_tx.clone();
+            let tx = toast_tx_pause.clone();
             std::thread::spawn(move || {
                 if let Err(e) = client.run(&cmd) {
                     let _ = tx.send(format!("Kunne ikke ændre pause: {e}"));
@@ -311,8 +312,9 @@ fn build_ui(app: &adw::Application) {
     });
     {
         let status_rx = std::sync::Mutex::new(status_rx);
+        let ui = ui.clone();
         glib::idle_add_local(move || {
-            let mut rx = status_rx.lock().unwrap();
+            let rx = status_rx.lock().unwrap();
             while let Ok(status) = rx.try_recv() {
                 ui.apply(&status);
             }
@@ -331,6 +333,7 @@ fn build_ui(app: &adw::Application) {
     window.present();
 }
 
+#[derive(Clone)]
 struct StatusWidgets {
     state_label: gtk::Label,
     email_label: gtk::Label,
