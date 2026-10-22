@@ -74,6 +74,7 @@ fn build_ui(app: &adw::Application) {
         .default_width(800)
         .default_height(600)
         .title("Jotta Desktop")
+        .icon_name("jotta-desktop")
         .build();
 
     // Toast overlay for command feedback.

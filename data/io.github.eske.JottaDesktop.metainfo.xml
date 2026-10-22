@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.eske.JottaDesktop</id>
+  <name>Jotta Desktop</name>
+  <summary>Desktop client for Jottacloud</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <description>
+    <p>
+      Jotta Desktop is a cross-desktop (KDE / GNOME / COSMIC) client for
+      Jottacloud, built in Rust. It provides a GTK4/libadwaita main window
+      for managing backups and sync, plus a StatusNotifierItem tray icon
+      that shows live status and allows pause/resume.
+    </p>
+    <p>
+      The backend is Jottacloud's official jottad/jotta-cli daemon — the app
+      is a thin frontend that supervises the daemon lifecycle (it reuses a
+      host systemd daemon if one is already running).
+    </p>
+  </description>
+  <launchable type="desktop-id">jotta-desktop.desktop</launchable>
+  <screenshots>
+    <!-- TODO: add screenshots before Flathub submission -->
+  </screenshots>
+  <url type="homepage">https://github.com/geouck/JottaGUI</url>
+  <url type="bugtracker">https://github.com/geouck/JottaGUI/issues</url>
+  <developer_name>Eske</developer_name>
+  <update_contact>eske@tuta.io</update_contact>
+  <releases>
+    <release version="0.1.0" date="2026-01-01">
+      <description>
+        <p>Initial iteration: status dashboard, backup list + add folder,
+        sync start/stop, pause/resume, tray icon with 5 states.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>jottacloud</keyword>
+    <keyword>cloud</keyword>
+    <keyword>backup</keyword>
+    <keyword>sync</keyword>
+    <keyword>storage</keyword>
+  </keywords>
+</component>
