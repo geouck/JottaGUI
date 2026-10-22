@@ -1,0 +1,14 @@
+[package]
+name = "jotta-tray"
+version = "0.1.0"
+edition = "2021"
+description = "StatusNotifierItem tray icon for Jotta Desktop (works on KDE, GNOME w/ AppIndicator ext, COSMIC)."
+license = "MPL-2.0"
+
+[dependencies]
+jotta-core = { path = "../jotta-core" }
+ksni = "0.3"
+
+[[bin]]
+name = "jotta-tray"
+path = "src/main.rs"

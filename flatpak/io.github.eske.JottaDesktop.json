@@ -1,0 +1,46 @@
+{
+  "app-id": "io.github.eske.JottaDesktop",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "48",
+  "sdk": "org.gnome.Sdk",
+  "command": "jotta-desktop",
+  "finish-args": [
+    "--share=network",
+    "--socket=session-bus",
+    "--filesystem=host",
+    "--filesystem=xdg-run/jottad",
+    "--talk-name=org.freedesktop.Flatpak"
+  ],
+  "modules": [
+    {
+      "name": "jotta-desktop",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release --offline -p jotta-gui -p jotta-tray",
+        "install -Dm755 target/release/jotta-desktop /app/bin/jotta-desktop",
+        "install -Dm755 target/release/jotta-tray /app/bin/jotta-tray"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".."
+        }
+      ]
+    },
+    {
+      "name": "jotta-cli",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -Dm755 jotta-cli /app/bin/jotta-cli",
+        "install -Dm755 jottad /app/bin/jottad"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://repo.jotta.cloud/downloads/linux/x64/jotta-cli-<version>.tar.gz",
+          "sha256": "TBD"
+        }
+      ]
+    }
+  ]
+}
