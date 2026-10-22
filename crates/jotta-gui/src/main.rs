@@ -283,7 +283,7 @@ fn build_ui(app: &adw::Application) {
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
-    let ui = Arc::new(StatusWidgets {
+    let ui = StatusWidgets {
         state_label: status_state_label.clone(),
         email_label: status_email_label.clone(),
         level: status_level.clone(),
@@ -293,7 +293,10 @@ fn build_ui(app: &adw::Application) {
         sync_switch: sync_switch.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
-    });
+    };
+    // Only Status (plain data) crosses the thread boundary via this channel.
+    // The main loop applies it to the widgets; widgets never leave this thread.
+    let (status_tx, status_rx) = std::sync::mpsc::channel::<Status>();
     std::thread::spawn(move || loop {
         let status = match poll_client.status() {
             Ok(v) => Status::from_json(&v),
@@ -303,15 +306,19 @@ fn build_ui(app: &adw::Application) {
             let mut guard = poll_status.lock().unwrap();
             *guard = status.clone();
         }
-        let update = UiUpdate {
-            status: status.clone(),
-            widgets: Arc::clone(&ui),
-        };
-        glib::idle_add_local_once(move || {
-            update.widgets.apply(&update.status);
-        });
+        let _ = status_tx.send(status);
         std::thread::sleep(Duration::from_secs(3));
     });
+    {
+        let status_rx = std::sync::Mutex::new(status_rx);
+        glib::idle_add_local(move || {
+            let mut rx = status_rx.lock().unwrap();
+            while let Ok(status) = rx.try_recv() {
+                ui.apply(&status);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Initial population.
     let initial = core.poll();
@@ -336,19 +343,7 @@ struct StatusWidgets {
     sync_count_row: adw::ActionRow,
 }
 
-struct UiUpdate {
-    status: Status,
-    widgets: Arc<StatusWidgets>,
-}
 
-impl Clone for UiUpdate {
-    fn clone(&self) -> Self {
-        UiUpdate {
-            status: self.status.clone(),
-            widgets: Arc::clone(&self.widgets),
-        }
-    }
-}
 
 impl StatusWidgets {
     fn apply(&self, status: &Status) {
