@@ -11,6 +11,7 @@
 use gtk::glib::clone;
 use gtk::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 
 fn main() {
     adw::init().expect("failed to init libadwaita");
@@ -46,11 +47,14 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&placeholder("Ignore-mønstre"), Some("ignores"), "Ignore-mønstre");
     stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
 
-    sidebar.connect_row_selected(clone!(@strong stack => move |_, row| {
-        if let Some(row) = row {
-            if let Some(child) = row.child() {
-                if let Some(label) = child.downcast_ref::<gtk::Label>() {
-                    if let Some(title) = label.text().as_deref().map(|s| s.to_string()) {
+    sidebar.connect_row_selected(clone!(
+        #[strong]
+        stack,
+        move |_, row| {
+            if let Some(row) = row {
+                if let Some(child) = row.child() {
+                    if let Some(label) = child.downcast_ref::<gtk::Label>() {
+                        let title = label.text().to_string();
                         let page = match title.as_str() {
                             "Status" => Some("status"),
                             "Backup" => Some("backup"),
@@ -65,8 +69,8 @@ fn build_ui(app: &adw::Application) {
                     }
                 }
             }
-        }
-    }));
+        },
+    ));
 
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
     sidebar.set_margin_top(12);
@@ -115,8 +119,8 @@ fn status_page() -> gtk::Widget {
     let used = 850_000_000_000u64;
     let quota = 5_000_000_000_000u64;
     let level = gtk::LevelBar::builder()
-        .min(0.0)
-        .max(quota as f64)
+        .min_value(0.0)
+        .max_value(quota as f64)
         .value(used as f64)
         .valign(gtk::Align::Start)
         .build();
