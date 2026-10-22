@@ -71,12 +71,29 @@ pub enum JottaCommand {
     SyncStop,
     /// `sync log -n <n>`
     SyncLog(usize),
-    /// `ignores add --pattern <pat>` (optionally scoped to one backup).
+    /// `ignores add --pattern <pat> [--backup NAME]` — BACKUP ignores only.
+    /// `backup: None` means "all backups" (NOT the default — UI must ask).
+    /// WARNING: adding a pattern removes already-backed-up matching files
+    /// (they go to Trash). Destructive — always confirm in the UI.
     IgnoreAdd { pattern: String, backup: Option<String> },
-    /// `ignores rem --pattern <pat>`
+    /// `ignores rem --pattern <pat> [--backup NAME]` — BACKUP ignores only.
     IgnoreRemove { pattern: String, backup: Option<String> },
-    /// `ignores list`
-    IgnoresList,
+    /// `ignores list [--backup NAME]` — BACKUP ignores only.
+    /// `backup: None` lists patterns for ALL backups.
+    IgnoresList { backup: Option<String> },
+    /// `ignores test --pattern <pat> --path <path>` — validate a pattern
+    /// against a path before adding (BACKUP ignores).
+    IgnoreTest { pattern: String, path: String },
+    /// `sync selective add <folder>` — SYNC selective (NOT backup ignores).
+    /// Only works with top-level folders in the sync root. NOT destructive:
+    /// contents are not deleted locally or in the cloud.
+    SyncSelectiveAdd(String),
+    /// `sync selective rem <folder>` — SYNC selective. NOT destructive:
+    /// local and remote contents are merged on removal.
+    SyncSelectiveRemove(String),
+    /// `sync selective list` — SYNC selective. Returns list of ignored
+    /// top-level folder names.
+    SyncSelectiveList,
     /// `share <path>` -> returns a public URL.
     Share(PathBuf),
     /// `version`
@@ -132,7 +149,28 @@ impl JottaCommand {
                     args.push(b.clone());
                 }
             }
-            JottaCommand::IgnoresList => push(&mut args, &["ignores"]),
+            JottaCommand::IgnoresList { backup } => {
+                push(&mut args, &["ignores", "list"]);
+                if let Some(b) = backup {
+                    push(&mut args, &["--backup"]);
+                    args.push(b.clone());
+                }
+            }
+            JottaCommand::IgnoreTest { pattern, path } => {
+                push(&mut args, &["ignores", "test", "--pattern"]);
+                args.push(pattern.clone());
+                push(&mut args, &["--path"]);
+                args.push(path.clone());
+            }
+            JottaCommand::SyncSelectiveAdd(name) => {
+                push(&mut args, &["sync", "selective", "add"]);
+                args.push(name.clone());
+            }
+            JottaCommand::SyncSelectiveRemove(name) => {
+                push(&mut args, &["sync", "selective", "rem"]);
+                args.push(name.clone());
+            }
+            JottaCommand::SyncSelectiveList => push(&mut args, &["sync", "selective", "list"]),
             JottaCommand::Share(p) => {
                 push(&mut args, &["share"]);
                 args.push(p.to_string_lossy().into_owned());
@@ -144,7 +182,12 @@ impl JottaCommand {
 
     /// Whether the command's stdout is expected to be JSON.
     pub fn is_json(&self) -> bool {
-        matches!(self, JottaCommand::Status | JottaCommand::IgnoresList)
+        matches!(
+            self,
+            JottaCommand::Status
+                | JottaCommand::IgnoresList { .. }
+                | JottaCommand::SyncSelectiveList
+        )
     }
 }
 
@@ -229,11 +272,49 @@ mod tests {
             vec!["ignores", "add", "--pattern", "**/node_modules", "--backup", "Dev"]
         );
         assert_eq!(JottaCommand::SyncLog(20).argv(), vec!["sync", "log", "-n", "20"]);
+        // Backup ignores: "ignores list" (NOT bare "ignores") — verified against
+        // docs.jottacloud.com "Ignoring files and folders from backup".
+        assert_eq!(
+            JottaCommand::IgnoresList { backup: None }.argv(),
+            vec!["ignores", "list"]
+        );
+        assert_eq!(
+            JottaCommand::IgnoresList { backup: Some("Documents".into()) }.argv(),
+            vec!["ignores", "list", "--backup", "Documents"]
+        );
+        // Backup ignores without --backup means "all backups" — UI must not
+        // default to this silently.
+        assert_eq!(
+            JottaCommand::IgnoreAdd { pattern: "**.tmp".into(), backup: None }.argv(),
+            vec!["ignores", "add", "--pattern", "**.tmp"]
+        );
+        // Sync selective: top-level folder names, NOT gitignore globs.
+        assert_eq!(
+            JottaCommand::SyncSelectiveAdd("Photos".into()).argv(),
+            vec!["sync", "selective", "add", "Photos"]
+        );
+        assert_eq!(
+            JottaCommand::SyncSelectiveRemove("Photos".into()).argv(),
+            vec!["sync", "selective", "rem", "Photos"]
+        );
+        assert_eq!(
+            JottaCommand::SyncSelectiveList.argv(),
+            vec!["sync", "selective", "list"]
+        );
+        // ignores test validates a pattern before adding.
+        assert_eq!(
+            JottaCommand::IgnoreTest { pattern: "**.png".into(), path: "/home/eske/Documents/foto.png".into() }.argv(),
+            vec!["ignores", "test", "--pattern", "**.png", "--path", "/home/eske/Documents/foto.png"]
+        );
     }
 
     #[test]
     fn json_flags() {
         assert!(JottaCommand::Status.is_json());
+        assert!(JottaCommand::IgnoresList { backup: None }.is_json());
+        assert!(JottaCommand::SyncSelectiveList.is_json());
         assert!(!JottaCommand::Pause.is_json());
+        assert!(!JottaCommand::IgnoreAdd { pattern: "x".into(), backup: None }.is_json());
+        assert!(!JottaCommand::SyncSelectiveAdd("x".into()).is_json());
     }
 }

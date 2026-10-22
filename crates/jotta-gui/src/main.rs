@@ -100,7 +100,6 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&nav_item("Status"));
     sidebar.append(&nav_item("Backup"));
     sidebar.append(&nav_item("Sync"));
-    sidebar.append(&nav_item("Ignore-mønstre"));
     sidebar.append(&nav_item("Indstillinger"));
 
     let stack = gtk::Stack::new();
@@ -133,6 +132,8 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&backup_page, Some("backup"), "Backup");
 
     // --- Sync page ---
+    // Sync selective is NOT destructive (unlike backup ignores): ignored
+    // folders are not deleted locally or in the cloud. No confirmation dialog.
     let sync_title_row = adw::ActionRow::builder()
         .title("Automatisk sync")
         .subtitle("Synkroniserer mappen mellem dine enheder")
@@ -152,10 +153,20 @@ fn build_ui(app: &adw::Application) {
     sync_group.add(&sync_title_row);
     sync_group.add(&sync_path_row);
     sync_group.add(&sync_count_row);
+    // "Vælg mapper at synkronisere" — opens a checkbox dialog with top-level
+    // folders from the sync root. Matches the official Jottacloud app's
+    // "Choose folders to synchronize" from the Sync tab.
+    let sync_selective_btn = gtk::Button::with_label("Vælg mapper at synkronisere…");
+    sync_selective_btn.add_css_class("flat");
+    let sync_selective_row = adw::ActionRow::builder()
+        .title("Mappevalg")
+        .subtitle("Vælg hvilke top-level mapper der skal synkroniseres")
+        .build();
+    sync_selective_row.add_suffix(&sync_selective_btn);
+    sync_group.add(&sync_selective_row);
     let sync_page = build_sync_page(&sync_group);
     stack.add_titled(&sync_page, Some("sync"), "Sync");
 
-    stack.add_titled(&placeholder("Ignore-mønstre"), Some("ignores"), "Ignore-mønstre");
     stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
@@ -170,7 +181,6 @@ fn build_ui(app: &adw::Application) {
                             "Status" => Some("status"),
                             "Backup" => Some("backup"),
                             "Sync" => Some("sync"),
-                            "Ignore-mønstre" => Some("ignores"),
                             "Indstillinger" => Some("settings"),
                             _ => None,
                         };
@@ -257,6 +267,7 @@ fn build_ui(app: &adw::Application) {
     // "Tilføj mappe" button → FileDialog → BackupAdd.
     let add_btn = gtk::Button::with_label("Tilføj mappe…");
     add_btn.add_css_class("suggested-action");
+    let toast_tx_add = toast_tx.clone();
     add_btn.connect_clicked(clone!(
         #[weak]
         window,
@@ -265,13 +276,13 @@ fn build_ui(app: &adw::Application) {
             dialog.set_title("Vælg mappe til backup");
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Tilføj"));
-            let toast_tx = toast_tx.clone();
+            let toast_tx_add = toast_tx_add.clone();
             dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(file) => {
                         if let Some(path) = file.path() {
                             run_cli(JottaCommand::BackupAdd(path));
-                            let _ = toast_tx.send("Backup-mappe tilføjet".to_string());
+                            let _ = toast_tx_add.send("Backup-mappe tilføjet".to_string());
                         }
                     }
                     Err(_) => {} // user cancelled
@@ -282,10 +293,23 @@ fn build_ui(app: &adw::Application) {
     // Replace the placeholder button on the backup page with the wired one.
     replace_add_button(&backup_page, &add_btn);
 
+    // --- Sync selective: "Vælg mapper at synkronisere" checkbox dialog ---
+    // NOT destructive (unlike backup ignores) — no confirmation dialog.
+    // Matches the official Jottacloud app's "Choose folders to synchronize".
+    let toast_tx_sel = toast_tx.clone();
+    sync_selective_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        move |_| {
+            open_sync_selective_dialog(&window, &toast_tx_sel);
+        },
+    ));
+
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
     let ui = StatusWidgets {
+        window: window.clone(),
         state_label: status_state_label.clone(),
         email_label: status_email_label.clone(),
         level: status_level.clone(),
@@ -295,6 +319,7 @@ fn build_ui(app: &adw::Application) {
         sync_switch: sync_switch.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
+        toast_tx: toast_tx.clone(),
     };
     // Only Status (plain data) crosses the thread boundary via this channel.
     // The main loop applies it to the widgets; widgets never leave this thread.
@@ -334,8 +359,8 @@ fn build_ui(app: &adw::Application) {
     window.present();
 }
 
-#[derive(Clone)]
 struct StatusWidgets {
+    window: adw::ApplicationWindow,
     state_label: gtk::Label,
     email_label: gtk::Label,
     level: gtk::LevelBar,
@@ -345,6 +370,25 @@ struct StatusWidgets {
     sync_switch: gtk::Switch,
     sync_path_row: adw::ActionRow,
     sync_count_row: adw::ActionRow,
+    toast_tx: std::sync::mpsc::Sender<String>,
+}
+
+impl Clone for StatusWidgets {
+    fn clone(&self) -> Self {
+        StatusWidgets {
+            window: self.window.clone(),
+            state_label: self.state_label.clone(),
+            email_label: self.email_label.clone(),
+            level: self.level.clone(),
+            usage_label: self.usage_label.clone(),
+            pause_switch: self.pause_switch.clone(),
+            backup_list: self.backup_list.clone(),
+            sync_switch: self.sync_switch.clone(),
+            sync_path_row: self.sync_path_row.clone(),
+            sync_count_row: self.sync_count_row.clone(),
+            toast_tx: self.toast_tx.clone(),
+        }
+    }
 }
 
 
@@ -388,7 +432,7 @@ impl StatusWidgets {
         }
 
         // Backup list
-        rebuild_backup_list(&self.backup_list, &status.backups);
+        rebuild_backup_list(&self.backup_list, &status.backups, &self.toast_tx, &self.window);
 
         // Sync section
         if let Some(sync) = &status.sync {
@@ -421,7 +465,12 @@ fn run_cli(cmd: JottaCommand) {
     });
 }
 
-fn rebuild_backup_list(list: &gtk::ListBox, backups: &[jotta_core::status::BackupFolder]) {
+fn rebuild_backup_list(
+    list: &gtk::ListBox,
+    backups: &[jotta_core::status::BackupFolder],
+    toast_tx: &std::sync::mpsc::Sender<String>,
+    window: &adw::ApplicationWindow,
+) {
     // Remove all existing rows.
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
@@ -449,6 +498,21 @@ fn rebuild_backup_list(list: &gtk::ListBox, backups: &[jotta_core::status::Backu
             .title(&b.name)
             .subtitle(&subtitle)
             .build();
+        // "Exclude" button per backup row — opens the backup-ignores dialog
+        // scoped to THIS backup (matches the official Jottacloud app's
+        // "Exclude" button per backup folder). NOT the same as sync selective.
+        let exclude_btn = gtk::Button::with_label("Udeluk…");
+        exclude_btn.add_css_class("flat");
+        exclude_btn.set_valign(gtk::Align::Center);
+        exclude_btn.set_tooltip_text(Some("Udeluk filer/mønstre fra denne backup"));
+        let backup_name = b.name.clone();
+        let backup_path = b.path.clone();
+        let toast_tx = toast_tx.clone();
+        let window = window.clone();
+        exclude_btn.connect_clicked(move |_| {
+            open_backup_ignores_dialog(&window, &backup_name, &backup_path, &toast_tx);
+        });
+        row.add_suffix(&exclude_btn);
         list.append(&row);
     }
 }
@@ -525,6 +589,514 @@ fn placeholder(title: &str) -> gtk::Widget {
     let label = gtk::Label::new(Some(&format!("{title} — under udvikling")));
     label.set_vexpand(true);
     label.upcast()
+}
+
+/// Parse `jotta-cli ignores list --json` output (backup ignores).
+/// Schema is undocumented; tolerate several shapes:
+/// - ["p1", "p2"] | {"patterns": [...]} | [{"pattern": "p1"}]
+fn parse_ignores(v: &jotta_core::json::Value) -> Vec<String> {
+    use jotta_core::json::Value;
+    fn strs_from_array(arr: &[Value]) -> Vec<String> {
+        arr.iter()
+            .filter_map(|item| match item {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => item
+                    .path(&["pattern"])
+                    .or_else(|| item.path(&["Pattern"]))
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    }
+    match v {
+        Value::Array(arr) => strs_from_array(arr),
+        Value::Object(_) => v
+            .path(&["patterns"])
+            .or_else(|| v.path(&["Patterns"]))
+            .and_then(|x| x.as_array())
+            .map(strs_from_array)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Parse `jotta-cli sync selective list --json` output.
+/// Returns the list of selectively-ignored top-level folder names.
+/// Schema is undocumented; tolerate array-of-strings and object shapes.
+fn parse_sync_selective(v: &jotta_core::json::Value) -> Vec<String> {
+    parse_ignores(v)
+}
+
+/// List top-level directories in the sync root (for the checkbox dialog).
+/// Returns folder names only (not files), sorted.
+fn list_sync_root_folders(root: &str) -> Vec<String> {
+    let mut folders = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    folders.push(name.to_string());
+                }
+            }
+        }
+    }
+    folders.sort();
+    folders
+}
+
+/// Open the sync-selective checkbox dialog.
+///
+/// NOT destructive (unlike backup ignores): ignored folders are not deleted
+/// locally or in the cloud. Matches the official Jottacloud app's
+/// "Choose folders to synchronize" dialog from the Sync tab.
+///
+/// Shows all top-level folders in the sync root with checkboxes.
+/// Checked = will be synced. Unchecked = selectively ignored.
+/// On "Anvend": computes the diff and issues SyncSelectiveAdd/Remove.
+fn open_sync_selective_dialog(
+    parent: &adw::ApplicationWindow,
+    toast_tx: &std::sync::mpsc::Sender<String>,
+) {
+    // Channel for dialog data: (sync_root, all_folders, currently_ignored).
+    // Only plain data crosses the thread boundary; the parent window and all
+    // widgets stay on the main thread via idle_add_local (no Send required).
+    let (data_tx, data_rx) = std::sync::mpsc::channel::<(String, Vec<String>, Vec<String>)>();
+    let data_rx = Arc::new(Mutex::new(data_rx));
+    let parent = parent.clone();
+    let toast_tx_dlg = toast_tx.clone();
+    glib::idle_add_local(move || {
+        let rx = data_rx.lock().unwrap();
+        match rx.try_recv() {
+            Ok((sync_root, all_folders, ignored)) => {
+                build_sync_selective_dialog(&parent, &sync_root, &all_folders, &ignored, &toast_tx_dlg);
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+        }
+    });
+
+    let toast_tx = toast_tx.clone();
+    std::thread::spawn(move || {
+        let client = match BinaryLocator::from_path() {
+            Some(loc) => CliClient::new(loc),
+            None => return,
+        };
+        let sync_root = match client.status() {
+            Ok(v) => jotta_core::status::Status::from_json(&v)
+                .sync
+                .and_then(|s| s.root_path),
+            Err(_) => None,
+        };
+        let sync_root = match sync_root {
+            Some(r) => r,
+            None => {
+                let _ = toast_tx.send("Ingen sync-mappe konfigureret".to_string());
+                return;
+            }
+        };
+        let ignored = match client.run_json(&JottaCommand::SyncSelectiveList) {
+            Ok(v) => parse_sync_selective(&v),
+            Err(_) => Vec::new(),
+        };
+        let all_folders = list_sync_root_folders(&sync_root);
+        let _ = data_tx.send((sync_root, all_folders, ignored));
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_sync_selective_dialog(
+    parent: &adw::ApplicationWindow,
+    sync_root: &str,
+    all_folders: &[String],
+    currently_ignored: &[String],
+    toast_tx: &std::sync::mpsc::Sender<String>,
+) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some("Vælg mapper at synkronisere"));
+    dialog.set_transient_for(Some(parent));
+    dialog.set_modal(true);
+    dialog.set_default_width(420);
+    dialog.set_default_height(480);
+
+    let content = dialog.content_area();
+    content.set_spacing(12);
+    set_margin_all(&content, 18);
+
+    let intro = gtk::Label::new(Some(&format!(
+        "Vælg hvilke mapper i {sync_root} der skal synkroniseres.\nAfkrydsede mapper synkroniseres. Fjernede afkrydsninger stopper sync for den mappe — filerne slettes ikke hverken lokalt eller i skyen."
+    )));
+    intro.set_wrap(true);
+    intro.set_xalign(0.0);
+    intro.add_css_class("dim-label");
+    content.append(&intro);
+
+    let list_box = gtk::ListBox::new();
+    list_box.add_css_class("boxed-list");
+    let mut checkboxes: Vec<(String, gtk::CheckButton)> = Vec::new();
+    if all_folders.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen mapper i sync-mappen")
+            .subtitle("Tilføj mapper til sync-mappen for at kunne vælge dem her")
+            .build();
+        list_box.append(&row);
+    }
+    for folder in all_folders {
+        let is_ignored = currently_ignored.iter().any(|i| i == folder);
+        let cb = gtk::CheckButton::with_label(folder);
+        cb.set_active(!is_ignored);
+        let row = adw::ActionRow::builder().title(folder).build();
+        row.add_suffix(&cb);
+        row.set_activatable_widget(Some(&cb));
+        list_box.append(&row);
+        checkboxes.push((folder.clone(), cb));
+    }
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(&list_box));
+    scrolled.set_vexpand(true);
+    scrolled.set_min_content_height(200);
+    content.append(&scrolled);
+
+    dialog.add_button("Annuller", gtk::ResponseType::Cancel);
+    let apply_btn = dialog.add_button("Anvend", gtk::ResponseType::Apply);
+    apply_btn.add_css_class("suggested-action");
+    dialog.set_default_response(gtk::ResponseType::Apply);
+
+    let toast_tx = toast_tx.clone();
+    let currently_ignored = currently_ignored.to_vec();
+    dialog.connect_response(move |dlg, response| {
+        if response == gtk::ResponseType::Apply {
+            let mut to_add: Vec<String> = Vec::new();
+            let mut to_remove: Vec<String> = Vec::new();
+            for (folder, cb) in &checkboxes {
+                let was_ignored = currently_ignored.iter().any(|i| i == folder);
+                let is_checked = cb.is_active();
+                if was_ignored && is_checked {
+                    to_remove.push(folder.clone());
+                } else if !was_ignored && !is_checked {
+                    to_add.push(folder.clone());
+                }
+            }
+            let toast_tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let mut errors = Vec::new();
+                    for name in &to_add {
+                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                    for name in &to_remove {
+                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                    let msg = if errors.is_empty() {
+                        let n = to_add.len() + to_remove.len();
+                        if n == 0 {
+                            "Ingen ændringer".to_string()
+                        } else {
+                            format!("{n} mappevalg opdateret")
+                        }
+                    } else {
+                        format!("Fejl: {}", errors.join(", "))
+                    };
+                    let _ = toast_tx.send(msg);
+                }
+            });
+        }
+        dlg.close();
+    });
+
+    dialog.present();
+}
+
+/// Open the backup-ignores dialog for ONE specific backup folder.
+///
+/// DESTRUCTIVE: adding a pattern removes already-backed-up matching files
+/// (they go to Trash). Always shows a confirmation before adding.
+///
+/// Scope selector: "denne backup" (default, --backup NAME) / "alle backups"
+/// (no flag). "Alle backups" is NEVER the silent default.
+fn open_backup_ignores_dialog(
+    window: &adw::ApplicationWindow,
+    backup_name: &str,
+    backup_path: &str,
+    toast_tx: &std::sync::mpsc::Sender<String>,
+) {
+    let dialog = gtk::Dialog::new();
+    dialog.set_title(Some(&format!("Udeluk fra backup: {backup_name}")));
+    dialog.set_transient_for(Some(window));
+    dialog.set_modal(true);
+    dialog.set_default_width(480);
+    dialog.set_default_height(520);
+
+    let content = dialog.content_area();
+    content.set_spacing(12);
+    set_margin_all(&content, 18);
+
+    let scope_model = gtk::StringList::new(&["Denne backup", "Alle backups"]);
+    let scope_row = adw::ComboRow::builder()
+        .title("Anvend på")
+        .subtitle("Vælg hvilke backups mønsteret gælder for")
+        .model(&scope_model)
+        .selected(0)
+        .build();
+    let scope_group = adw::PreferencesGroup::new();
+    scope_group.add(&scope_row);
+    content.append(&scope_group);
+
+    let warning = gtk::Label::new(Some(
+        "Advarsel: Tilføjelse af et mønster fjerner allerede backup'ede filer der matcher mønsteret — de flyttes til papirkurven i Jottacloud.",
+    ));
+    warning.add_css_class("warning");
+    warning.add_css_class("dim-label");
+    warning.set_wrap(true);
+    warning.set_xalign(0.0);
+    content.append(&warning);
+
+    let pattern_entry = adw::EntryRow::builder()
+        .title("Nyt mønster")
+        .show_apply_button(true)
+        .build();
+    let entry_group = adw::PreferencesGroup::builder()
+        .title("Mønstre")
+        .description("Gitignore-syntaks, relativ til backup-roden (stien nedenfor). Eksempler: **.tmp, node_modules/, *.log")
+        .build();
+    entry_group.add(&pattern_entry);
+    content.append(&entry_group);
+
+    let path_label = gtk::Label::new(Some(&format!("Backup-rod: {backup_path}")));
+    path_label.add_css_class("dim-label");
+    path_label.set_xalign(0.0);
+    path_label.set_wrap(true);
+    content.append(&path_label);
+
+    let patterns_list = gtk::ListBox::new();
+    patterns_list.add_css_class("boxed-list");
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(&patterns_list));
+    scrolled.set_min_content_height(120);
+    scrolled.set_vexpand(true);
+    content.append(&scrolled);
+
+    // Initial load of patterns: worker thread fetches, main thread rebuilds.
+    // Only plain data (Vec<String>) crosses the thread boundary.
+    {
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<String>>();
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        let patterns_list = patterns_list.clone();
+        let backup_name_idle = backup_name.to_string();
+        let toast_tx = toast_tx.clone();
+        glib::idle_add_local(move || {
+            let rx = data_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(patterns) => {
+                    rebuild_backup_ignores_list(&patterns_list, &patterns, &backup_name_idle, &toast_tx);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+        let backup_name = backup_name.to_string();
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: Some(backup_name) }) {
+                    let patterns = parse_ignores(&v);
+                    let _ = data_tx.send(patterns);
+                }
+            }
+        });
+    }
+
+    let toast_tx2 = toast_tx.clone();
+    let backup_name2 = backup_name.to_string();
+    let scope_row2 = scope_row.clone();
+    let patterns_list2 = patterns_list.clone();
+    let dialog_weak = dialog.downgrade();
+    pattern_entry.connect_apply(move |entry| {
+        let pattern = entry.text().to_string();
+        if pattern.trim().is_empty() {
+            return;
+        }
+        let pattern = pattern.trim().to_string();
+        let backup = if scope_row2.selected() == 0 {
+            Some(backup_name2.clone())
+        } else {
+            None
+        };
+        let confirm = adw::AlertDialog::new(
+            Some("Tilføj udelukkelsesmønster?"),
+            Some(&format!(
+                "Mønsteret `{pattern}` tilføjes{}. Matcher mønsteret filer der allerede er backup'et, flyttes de til papirkurven i Jottacloud.",
+                if backup.is_some() {
+                    format!(" for backup'en `{}`", backup_name2)
+                } else {
+                    " for ALLE backups".to_string()
+                }
+            )),
+        );
+        confirm.add_response("cancel", "Annuller");
+        confirm.add_response("add", "Tilføj mønster");
+        confirm.set_response_appearance("add", adw::ResponseAppearance::Destructive);
+        confirm.set_default_response(Some("cancel"));
+        confirm.set_close_response("cancel");
+        let toast_tx = toast_tx2.clone();
+        let patterns_list = patterns_list2.clone();
+        let backup_name = backup_name2.clone();
+        let pattern_clone = pattern.clone();
+        let backup_clone = backup.clone();
+        let Some(dlg) = dialog_weak.upgrade() else { return };
+        confirm.choose(&dlg, None::<&gtk::gio::Cancellable>, move |resp| {
+            if resp == "add" {
+                // Refresh channel: worker sends Vec<String>, main thread rebuilds.
+                // The patterns_list widget never crosses the thread boundary.
+                let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<String>>();
+                let refresh_rx = Arc::new(Mutex::new(refresh_rx));
+                let patterns_list = patterns_list.clone();
+                let backup_name_r = backup_name.clone();
+                let toast_tx_r = toast_tx.clone();
+                glib::idle_add_local(move || {
+                    let rx = refresh_rx.lock().unwrap();
+                    match rx.try_recv() {
+                        Ok(patterns) => {
+                            rebuild_backup_ignores_list(&patterns_list, &patterns, &backup_name_r, &toast_tx_r);
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                    }
+                });
+
+                let toast_tx = toast_tx.clone();
+                let backup_name = backup_name.clone();
+                let pattern = pattern_clone.clone();
+                let backup = backup_clone.clone();
+                std::thread::spawn(move || {
+                    if let Some(loc) = BinaryLocator::from_path() {
+                        let client = CliClient::new(loc);
+                        match client.run(&JottaCommand::IgnoreAdd { pattern: pattern.clone(), backup: backup.clone() }) {
+                            Ok(_) => {
+                                let _ = toast_tx.send(format!("Mønster tilføjet: {pattern}"));
+                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: Some(backup_name.clone()) }) {
+                                    let patterns = parse_ignores(&v);
+                                    let _ = refresh_tx.send(patterns);
+                                }
+                            }
+                            Err(e) => {
+                                let _ = toast_tx.send(format!("Kunne ikke tilføje mønster: {e}"));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        entry.set_text("");
+    });
+
+    dialog.add_button("Luk", gtk::ResponseType::Close);
+    dialog.set_default_response(gtk::ResponseType::Close);
+    dialog.connect_response(move |dlg, _| {
+        dlg.close();
+    });
+
+    dialog.present();
+}
+
+fn rebuild_backup_ignores_list(
+    list: &gtk::ListBox,
+    patterns: &[String],
+    backup_name: &str,
+    toast_tx: &std::sync::mpsc::Sender<String>,
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    if patterns.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen udelukkelsesmønstre")
+            .subtitle("Tilføj et mønster ovenfor")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for pattern in patterns {
+        let row = adw::ActionRow::builder().title(pattern).build();
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        remove_btn.set_tooltip_text(Some("Fjern mønster"));
+        let pattern = pattern.to_string();
+        let backup_name = backup_name.to_string();
+        let toast_tx_remove = toast_tx.clone();
+        let list_remove = list.clone();
+        remove_btn.connect_clicked(move |_| {
+            let confirm = adw::AlertDialog::new(
+                Some("Fjern udelukkelsesmønster?"),
+                Some(&format!(
+                    "Mønsteret `{pattern}` fjernes for backup'en `{backup_name}`. Filer der matcher igen bliver backet up ved næste scan."
+                )),
+            );
+            confirm.add_response("cancel", "Annuller");
+            confirm.add_response("remove", "Fjern");
+            confirm.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            confirm.set_default_response(Some("cancel"));
+            confirm.set_close_response("cancel");
+            let pattern = pattern.clone();
+            let backup_name = backup_name.clone();
+            let toast_tx = toast_tx_remove.clone();
+            let list = list_remove.clone();
+            let root = list.root();
+            confirm.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
+                if resp == "remove" {
+                    // Refresh channel: worker sends Vec<String>, main thread rebuilds.
+                    // The list widget never crosses the thread boundary.
+                    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<String>>();
+                    let refresh_rx = Arc::new(Mutex::new(refresh_rx));
+                    let list_r = list.clone();
+                    let backup_name_r = backup_name.clone();
+                    let toast_tx_r = toast_tx.clone();
+                    glib::idle_add_local(move || {
+                        let rx = refresh_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(patterns) => {
+                                rebuild_backup_ignores_list(&list_r, &patterns, &backup_name_r, &toast_tx_r);
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+
+                    let pattern = pattern.clone();
+                    let backup_name = backup_name.clone();
+                    let toast_tx = toast_tx.clone();
+                    std::thread::spawn(move || {
+                        if let Some(loc) = BinaryLocator::from_path() {
+                            let client = CliClient::new(loc);
+                            let _ = client.run(&JottaCommand::IgnoreRemove {
+                                pattern: pattern.clone(),
+                                backup: Some(backup_name.clone()),
+                            });
+                            if let Ok(v) = client.run_json(&JottaCommand::IgnoresList {
+                                backup: Some(backup_name.clone()),
+                            }) {
+                                let patterns = parse_ignores(&v);
+                                let _ = refresh_tx.send(patterns);
+                            }
+                            let _ = toast_tx.send("Mønster fjernet".to_string());
+                        }
+                    });
+                }
+            });
+        });
+        row.add_suffix(&remove_btn);
+        list.append(&row);
+    }
 }
 
 fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
