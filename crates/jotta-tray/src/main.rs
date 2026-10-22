@@ -9,8 +9,11 @@
 use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
 use jotta_core::daemon::DaemonSupervisor;
 use jotta_core::status::{State, Status};
-use ksni::Tray;
+use ksni::blocking::{Handle, TrayMethods};
+use ksni::menu::StandardItem;
+use ksni::{MenuItem, Status as SniStatus, ToolTip, Tray};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,64 +25,94 @@ struct AppState {
 
 struct JottaTray {
     state: Arc<Mutex<AppState>>,
+    quit: Arc<AtomicBool>,
 }
 
-impl ksni::Tray for JottaTray {
-    fn icon_name(&self) -> String {
-        match self.state.lock().unwrap().status.state {
+impl JottaTray {
+    fn icon_for(state: State) -> &'static str {
+        match state {
             State::Idle => "jotta-desktop-idle",
             State::Syncing => "jotta-desktop-syncing",
             State::Paused => "jotta-desktop-paused",
             State::NeedsLogin => "jotta-desktop-attention",
             State::Offline => "jotta-desktop-offline",
         }
-        .to_string()
+    }
+}
+
+impl Tray for JottaTray {
+    fn id(&self) -> String {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn icon_name(&self) -> String {
+        Self::icon_for(self.state.lock().unwrap().status.state).to_string()
     }
 
     fn title(&self) -> String {
         "Jotta Desktop".into()
     }
 
-    fn tool_tip(&self) -> String {
-        self.state.lock().unwrap().status.tooltip()
+    fn status(&self) -> SniStatus {
+        match self.state.lock().unwrap().status.state {
+            State::NeedsLogin => SniStatus::NeedsAttention,
+            State::Offline => SniStatus::Passive,
+            _ => SniStatus::Active,
+        }
     }
 
-    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+    fn tool_tip(&self) -> ToolTip {
         let s = self.state.lock().unwrap();
+        let description = match &s.err {
+            Some(e) => format!("Fejl: {e}"),
+            None => s.status.tooltip(),
+        };
+        ToolTip {
+            icon_name: Self::icon_for(s.status.state).to_string(),
+            title: "Jotta Desktop".into(),
+            description,
+            ..Default::default()
+        }
+    }
+
+    fn menu(&self) -> Vec<MenuItem<Self>> {
+        let s = self.state.lock().unwrap();
+        let quit = Arc::clone(&self.quit);
         vec![
-            ksni::StandardItem {
+            StandardItem {
                 label: format!("Status: {}", s.status.tooltip()),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
-            ksni::MenuItem::Separator,
+            MenuItem::Separator,
             match s.status.paused {
-                Some(true) => ksni::MenuItem::Standard(ksni::StandardItem {
+                Some(true) => StandardItem {
                     label: "Genoptag".into(),
-                    activate: Box::new(|_tray, _app| do_simple(JottaCommand::Resume)),
+                    activate: Box::new(|_tray| run_simple(JottaCommand::Resume)),
                     ..Default::default()
-                }),
-                _ => ksni::MenuItem::Standard(ksni::StandardItem {
+                }
+                .into(),
+                _ => StandardItem {
                     label: "Pause".into(),
-                    activate: Box::new(|_tray, _app| do_simple(JottaCommand::Pause)),
+                    activate: Box::new(|_tray| run_simple(JottaCommand::Pause)),
                     ..Default::default()
-                }),
+                }
+                .into(),
             },
-            ksni::MenuItem::Separator,
-            ksni::StandardItem {
+            MenuItem::Separator,
+            StandardItem {
                 label: "Åbn jottacloud.com".into(),
-                activate: Box::new(|_tray, _app| {
+                activate: Box::new(|_tray| {
                     let _ = open_url("https://www.jottacloud.com/web/");
                 }),
                 ..Default::default()
             }
             .into(),
-            ksni::StandardItem {
+            StandardItem {
                 label: "Afslut".into(),
-                activate: Box::new(|tray: &mut Self, _app| {
-                    tray.state.lock().unwrap().err = Some("quit".into());
-                    ksni::spawn(|| std::process::exit(0)).ok();
+                activate: Box::new(move |_tray| {
+                    quit.store(true, Ordering::SeqCst);
                 }),
                 ..Default::default()
             }
@@ -88,16 +121,15 @@ impl ksni::Tray for JottaTray {
     }
 }
 
-fn do_simple(cmd: JottaCommand) {
-    ksni::spawn(move || {
+fn run_simple(cmd: JottaCommand) {
+    std::thread::spawn(move || {
         if let Some(loc) = BinaryLocator::from_path() {
             let client = CliClient::new(loc);
             if let Err(e) = client.run(&cmd) {
                 eprintln!("jotta-tray: {e}");
             }
         }
-    })
-    .ok();
+    });
 }
 
 fn open_url(url: &str) -> std::io::Result<()> {
@@ -121,7 +153,7 @@ fn main() {
         });
     std::fs::create_dir_all(&data_dir).ok();
 
-    // Ensure the daemon is up (Model B: we may own it; Model A: reuse host one).
+    // Ensure the daemon is up (Model B: we may own it; otherwise reuse the host one).
     let locator = BinaryLocator::from_path()
         .or_else(|| {
             let exe = std::env::current_exe().ok()?;
@@ -146,42 +178,48 @@ fn main() {
     }
 
     let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None }));
+    let quit = Arc::new(AtomicBool::new(false));
+
+    let handle: Handle<JottaTray> = JottaTray {
+        state: Arc::clone(&state),
+        quit: Arc::clone(&quit),
+    }
+    .spawn()
+    .expect("could not start tray service");
+
+    // Poll status every 3s and refresh the tray.
     let poll_state = Arc::clone(&state);
-    let client = CliClient::new(locator.clone());
-
-    let service = ksni::TrayService::new(JottaTray { state: Arc::clone(&state) });
-    let handle = service.handle();
-    service.spawn();
-
+    let poll_handle = handle.clone();
+    let poll_client = CliClient::new(locator.clone());
     std::thread::spawn(move || loop {
-        match client.run(&JottaCommand::Status) {
-            Ok(out) => {
-                let parsed = jotta_core::json::parse(out.stdout.trim())
-                    .and_then(|v| Ok(Status::from_json(&v)));
-                match parsed {
-                    Ok(status) => {
-                        let mut st = poll_state.lock().unwrap();
-                        st.status = status;
-                        st.err = None;
-                    }
-                    Err(e) => {
-                        let mut st = poll_state.lock().unwrap();
-                        st.err = Some(e.to_string());
-                    }
+        match poll_client.run(&JottaCommand::Status) {
+            Ok(out) => match jotta_core::json::parse(out.stdout.trim()).map(|v| Status::from_json(&v)) {
+                Ok(status) => {
+                    let mut st = poll_state.lock().unwrap();
+                    st.status = status;
+                    st.err = None;
                 }
-            }
+                Err(e) => {
+                    let mut st = poll_state.lock().unwrap();
+                    st.err = Some(e);
+                }
+            },
             Err(e) => {
                 let mut st = poll_state.lock().unwrap();
                 st.status = Status::default();
                 st.err = Some(e.to_string());
             }
         }
-        handle.update(|_tray: &mut JottaTray| {});
+        poll_handle.update(|_tray| {});
         std::thread::sleep(Duration::from_secs(3));
     });
 
-    // Park main thread; ksni runs its own event loop.
-    loop {
-        std::thread::sleep(Duration::from_secs(3600));
+    // Main thread: wait for a quit request from the menu, then shut down cleanly.
+    while !quit.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    handle.shutdown().wait();
+    if let Err(e) = supervisor.stop_if_owned() {
+        eprintln!("jotta-tray: {e}");
     }
 }

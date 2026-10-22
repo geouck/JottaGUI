@@ -7,7 +7,7 @@ license = "MPL-2.0"
 
 [dependencies]
 jotta-core = { path = "../jotta-core" }
-ksni = "0.3"
+ksni = { version = "0.3", features = ["blocking"] }
 
 [[bin]]
 name = "jotta-tray"
