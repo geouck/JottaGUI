@@ -1,0 +1,10 @@
+[package]
+name = "jotta-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for Jotta Desktop: jottad supervision and jotta-cli process wrapping. Zero external dependencies."
+license = "MPL-2.0"
+
+[lib]
+name = "jotta_core"
+path = "src/lib.rs"

@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jotta-core",
+    "crates/jotta-tray",
+    "crates/jotta-gui",
+]
