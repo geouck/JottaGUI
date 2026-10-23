@@ -57,23 +57,48 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - CLI calls go through the `JottaCommand` enum -> `argv()` whitelist. The GUI must NEVER shell out with raw strings.
 - Process model: `jotta-tray` autostarts at login (XDG autostart .desktop) and runs persistently as the always-on background process. `jotta-desktop` (GUI) is launched on demand — from the tray menu ("Åbn vindue"), the app menu, or the .desktop file. The GUI is a GApplication single-instance (application_id `io.github.eske.JottaDesktop`): a second launch activates the existing window instead of opening a new one. When the last GUI window closes, `connect_window_removed` sets a shutdown AtomicBool, the 3s status poller checks it and terminates, and `app.quit()` ends the GTK main loop — the process exits cleanly. The tray keeps running independently.
 
-## Current state (iteration 1, pushed to this repo)
+## Current state (iteration 6 + 6o complete; PR #7 merged, PR #9 draft)
 
-- jotta-core: compiles clean (`cargo check` verified in a sandbox), JSON parser + CLI wrapper + daemon supervisor + status state machine, with unit tests (NOT yet executed - the authoring sandbox cannot link test binaries; run `cargo test -p jotta-core` on a real machine).
-- jotta-tray: MVP (status tooltip, pause/resume, open web, quit; 3s polling).
-- jotta-gui: skeleton (sidebar, status/backup/sync pages, TODO markers where handlers go).
-- flatpak manifest: draft, jotta-cli source URL needs a pinned version + sha256.
+- jotta-core: 28 unit tests green. Zero dependencies. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model, remote JSON parsers (`ls --json`, `list downloads --json`), file revisions, download entries.
+- jotta-tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (5 states × 5 sizes). Menu: status, pause/resume (idempotent), "Åbn vindue", "Åbn jottacloud.com", "Afslut". Single-instance via PID file. Spawns GUI via `find_gui_binary()` + reaper thread. Click on icon (`activate()`) opens GUI. Reads minimize-to-tray setting from `~/.config/jotta-desktop/settings.conf`.
+- jotta-gui: GTK4/libadwaita main window. GApplication single-instance (`io.github.eske.JottaDesktop`). Pages: Status (konto-kort, automatisk backup/sync switch, lagerplads-kort), Backup (list, "Tilføj mappe", "Udeluk…" chevron, "Fjern" med AlertDialog), Sync (info, start/stop, selective folder dialog), Gendan/Restore (remote browser "Jottacloud" rod, download dialog, "Overførsler" liste, papirkurv web-knap), Indstillinger (minimize-to-tray switch, default ON). Dynamisk topbar titel. Sidebar med symbolic ikoner + app-titel. Ingen H1-overskrifter i sider. 0 deprecation warnings.
+- Data: icon theme (5 states + app icon + symbolic, all hicolor sizes), desktop entries (app + tray autostart), AppStream metainfo, Flatpak manifest (draft).
 
 ## Roadmap (priority order)
 
-1. Run `cargo test -p jotta-core` on a real machine; fix any failures.
-2. Compile tray+GUI on Fedora (`dnf install cargo rust gtk4-devel libadwaita-devel`); the gtk4-rs/libadwaita versions in Cargo.toml may need pinning to what Fedora 42+ ships.
-3. Wire GUI handlers: backup list (`BackupsList`), FileChooser -> `BackupAdd`, sync switch -> `SyncStart`/`SyncStop`, ignore-pattern editor (`IgnoreAdd`/`IgnoreRemove`/`IgnoresList`).
-4. Icon theme: 5 named icons (jotta-desktop-idle/-syncing/-paused/-attention/-offline) referenced by jotta-tray.
-5. Discover the real `status --json` schema on Eske's machine (`jotta-cli status --json | jq .`) and tighten `Status::from_json`.
-6. Restore/download flow (`jotta-cli download`).
-7. Flatpak: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
-8. Later: i18n (da/en), COPR + AUR packaging, KSNI menu enhancements (device list, activity).
+1. ~~Run `cargo test -p jotta-core`; fix failures~~ ✅ 28/28 green
+2. ~~Compile tray+GUI on Fedora~~ ✅ Verified by owner
+3. ~~Wire GUI handlers (backup, sync, ignores)~~ ✅ Iterations 3+5
+4. ~~Icon theme (5 states + symbolic)~~ ✅ Iteration 4
+5. ~~Discover real `status --json` schema; tighten parser~~ ✅ Verified against owner's machine
+6. ~~Restore/download flow~~ ✅ Iteration 6 (PR #6)
+7. **Transfers page** (iteration 7, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloaderrors` + `list uploaderrors` + live feed via `observe`. Error dedup (one toast per unique error).
+8. **Settings/robustness** (iteration 8): expand Indstillinger page — see "Future features" below for details.
+9. **Flatpak**: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
+
+### Future features (owner-requested, roadmap additions 2026-06)
+
+- **Launch on system startup** (Indstillinger): toggle for XDG autostart of `jotta-desktop` (in addition to existing `jotta-tray` autostart). Write/remove `~/.config/autostart/jotta-desktop.desktop`.
+- **Error notifications**: parse patterns from `jotta-cli status` / `list downloaderrors` / `list uploaderrors` / `sync log`. Show as desktop notifications (via `gtk::gio::Notification` or `notify-send`) + a persistent list in the GUI. Error dedup — one notification per unique error.
+- **Info page**: a new page (or section on Status) showing device info, jottad version, jotta-cli version, account type/subscription, last sync time, daemon uptime.
+- **Advanced settings** (Nextcloud-style): bandwidth limit (`config set maxuploadrate`/`maxdownloadrate`), scan interval (`config set scaninterval`), realtime mode toggle (`scaninterval 0`), webhook status interval. Read current values via `config get` or `config list`.
+- **Account page**: new page or section — account email, subscription plan, usage breakdown, "Log ud" button (`jotta-cli logout` — DESTRUCTIVE, confirm), "Skift bruger" (logout + login), link to jottacloud.com account settings.
+- **Page consolidation**: consider merging Status + Account into one "Konto" page, or Status + Info. Evaluate after Transfers page is done. Current 5 pages (Status, Backup, Sync, Gendan, Indstillinger) may become 5-6 with Account/Info split or stay at 5 with consolidation.
+- **Tray icon color** (Nextcloud-style): symbolic black/white variant selectable in Indstillinger.
+
+### Later
+
+- i18n (da/en), COPR + AUR packaging, "gendan gammel version" UI (revisions parsed but no UI yet), KSNI menu enhancements (device list, activity).
+
+### Process rules (established during iterations 6f–6o)
+- `cargo check -p jotta-gui` MUST be 0 warnings before every push.
+- Shadow-clone rule: `let x = x.clone(); move closure` ONLY for the LAST use of a value. One clone per closure, BEFORE move.
+- Threading: worker threads own ONLY plain data (String, PathBuf, CliClient, mpsc::Sender). No GTK widgets or Rc<RefCell<…>> cross thread boundaries. Results via mpsc + `glib::idle_add_local`.
+- Switch guards: poller NEVER issues commands. Only user action does. Use `Rc<Cell<bool>>` for programmatic-update guards, `Arc<AtomicBool>` for cross-thread lockouts.
+- Spawned children: always spawn in a `std::thread` that calls `child.wait()` (reaper pattern) to prevent zombies.
+- `std::process::exit(0)` for guaranteed termination (not `app.quit()` which can hang).
+- Tray binary lookup: same directory as current binary first, then PATH.
+- UI/UX: see "UI/UX design guidelines" section above for layout, icon, and interaction patterns.
 
 ## Working agreement with the owner
 
