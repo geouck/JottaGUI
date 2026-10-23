@@ -60,22 +60,41 @@ impl App {
 fn main() {
     adw::init().expect("failed to init libadwaita");
 
-    // CSS: kompakte window controls (minimer/maximer/luk).
-    // NOTE (iteration 7): These overrides do NOT change button size on KDE
-    // — likely KDE's kde-gtk-config theme integration or HiDPI scaling.
-    // See HANDOFF.md "UI/UX design guidelines" for TODO/debug notes.
+    // CSS: kompakte window controls (minimer/maximer/luk) + headerbar.
+    // Målretter child-elementerne windowcontrols > button og
+    // windowcontrols > button > image (Libadwaita sætter cirkel-baggrund
+    // og dimensioner på image-noden).
+    // Prioritet: USER + 1 så vi vinder over KDE's kde-gtk-config
+    // (~/.config/gtk-4.0/gtk.css som ligger på PRIORITY_USER = 800).
     // GTK4 CSS-nodes: windowcontrols > button.minimize/.maximize/.close
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
-        "windowcontrols button { min-width: 28px; min-height: 28px; padding: 0 4px; }\n\
-         windowcontrols button image { -gtk-icon-size: 16px; }\n\
-         headerbar { min-height: 40px; }\n\
-         headerbar button { min-width: 32px; min-height: 32px; }",
+        "headerbar {\n\
+         \x20   min-height: 25px;\n\
+         \x20   padding-top: 2px;\n\
+         \x20   padding-bottom: 2px;\n\
+         }\n\
+         windowcontrols {\n\
+         \x20   spacing: 2px;\n\
+         }\n\
+         windowcontrols > button {\n\
+         \x20   min-width: 16px;\n\
+         \x20   min-height: 16px;\n\
+         \x20   padding: 0px;\n\
+         \x20   margin: 0px 2px;\n\
+         }\n\
+         windowcontrols > button > image {\n\
+         \x20   min-width: 16px;\n\
+         \x20   min-height: 16px;\n\
+         \x20   padding: 2px;\n\
+         \x20   -gtk-icon-size: 14px;\n\
+         \x20   border-radius: 9999px;\n\
+         }",
     );
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("no display"),
         &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
     );
 
     // Single-instance: GApplication med application_id sikrer at kun én
