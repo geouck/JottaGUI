@@ -196,16 +196,27 @@ fn find_gui_binary() -> Option<std::path::PathBuf> {
 }
 
 /// Spawn jotta-desktop GUI (single-instance via GApplication).
+/// Spawner i en separat tråd der venter på child — ellers bliver den
+/// en zombie når GUI-processen terminerer (tray lever længere end GUI).
 fn spawn_gui() {
-    if let Some(bin) = find_gui_binary() {
-        let _ = std::process::Command::new(&bin)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    } else {
-        eprintln!("jotta-tray: jotta-desktop binary ikke fundet");
-    }
+    std::thread::spawn(|| {
+        if let Some(bin) = find_gui_binary() {
+            match std::process::Command::new(&bin)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    // Vent på at GUI-processen terminerer — reaper, undgår zombie.
+                    let _ = child.wait();
+                }
+                Err(e) => eprintln!("jotta-tray: kunne ikke starte jotta-desktop: {e}"),
+            }
+        } else {
+            eprintln!("jotta-tray: jotta-desktop binary ikke fundet");
+        }
+    });
 }
 
 fn run_simple(cmd: JottaCommand) {

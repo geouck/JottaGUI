@@ -93,6 +93,7 @@ fn main() {
 
 /// Spawn jotta-tray som detached child hvis den ikke allerede kører.
 /// Tjekker PID-fil i $XDG_RUNTIME_DIR; tray skriver sin egen PID ved opstart.
+/// Spawner i separat tråd der venter på child — undgår zombie-processer.
 fn ensure_tray_running() {
     let pid_file = std::env::var("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
@@ -112,20 +113,20 @@ fn ensure_tray_running() {
         .and_then(|exe| exe.parent().map(|dir| dir.join("jotta-tray")))
         .filter(|p| p.exists());
 
-    if let Some(bin) = tray_bin {
-        let _ = std::process::Command::new(bin)
+    let bin = tray_bin.unwrap_or_else(|| std::path::PathBuf::from("jotta-tray"));
+    std::thread::spawn(move || {
+        match std::process::Command::new(&bin)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
-        return;
-    }
-
-    let _ = std::process::Command::new("jotta-tray")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(e) => eprintln!("jotta-gui: kunne ikke starte jotta-tray: {e}"),
+        }
+    });
 }
 
 fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
@@ -178,6 +179,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     status_usage_label.add_css_class("dim-label");
     let pause_switch = gtk::Switch::new();
     pause_switch.set_valign(gtk::Align::Center);
+    // Initial state: ON = kører (ikke pauset). jottad kører som standard,
+    // og status.paused er ofte None i JSON — så vi antager "kører".
+    pause_switch.set_active(true);
 
     let status_page = build_status_page(
         &status_state_label,
@@ -1060,12 +1064,11 @@ impl StatusWidgets {
         // programmatisk set_active trigger IKKE connect_state_set-handleren.
         // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
         // Lockout: efter bruger-klik venter vi 15s før poller må opdatere switchen.
-        // paused == None betyder "ukendt" — vi må IKKE røre switchen i det tilfælde,
-        // for jotta-cli status --json rapporterer ikke altid et paused-felt.
-        let pause_active = status.state == State::Paused;
+        // paused == None betyder "ukendt" — jottad kører, så vi sætter ON (= kører).
+        // paused == Some(true) → OFF (= pauset). paused == Some(false) → ON (= kører).
+        let pause_active = status.paused != Some(true);
         if self.pause_switch.is_active() != pause_active
             && !self.pause_lockout.load(Ordering::SeqCst)
-            && status.paused.is_some()
         {
             self.pause_updating.set(true);
             self.pause_switch.set_active(pause_active);
