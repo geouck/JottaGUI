@@ -8,6 +8,7 @@
 //! The GUI never calls jotta-cli itself except through jotta-core types.
 //! All CLI calls run on a worker thread; the GTK main loop is never blocked.
 
+use gtk::gdk;
 use gtk::glib::{self, clone, Propagation};
 use gtk::prelude::*;
 use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
@@ -58,6 +59,19 @@ impl App {
 
 fn main() {
     adw::init().expect("failed to init libadwaita");
+
+    // CSS: kompakte window controls (minimer/maximer/luk) — mindre knapper
+    // så headerbaren ikke fylder for meget på KDE/COSMIC hvor knapperne
+    // ellers bliver for store sammenlignet med GNOME/Nextcloud.
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(
+        "headerbar button.windowbutton { min-width: 28px; min-height: 28px; padding: 0 4px; }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &gdk::Display::default().expect("no display"),
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 
     // Single-instance: GApplication med application_id sikrer at kun én
     // jotta-desktop kører ad gangen. Hvis en instans allerede kører,
