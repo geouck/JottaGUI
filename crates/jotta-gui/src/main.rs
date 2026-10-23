@@ -270,20 +270,15 @@ fn build_ui(app: &adw::Application) {
     sidebar_box.append(&sidebar);
 
     let sidebar_page = adw::NavigationPage::new(&sidebar_box, "Jotta Desktop");
-    let content_page = adw::NavigationPage::new(&stack, "Status");
 
     let split_view = adw::NavigationSplitView::new();
     split_view.set_sidebar(Some(&sidebar_page));
-    split_view.set_content(Some(&content_page));
 
     // FEATURE: Sider skal kunne scrolles når indholdet overflower.
-    // Vi wrapper hver side i en ScrolledWindow inde i stack.
-    let stack = &stack;
-    let stack_scrolled = gtk::ScrolledWindow::new();
-    stack_scrolled.set_child(Some(stack));
-    stack_scrolled.set_vexpand(true);
-    stack_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
-    stack_scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+    // gtk::Stack er IKKE scrollable — vi wrapper hver side individuelt
+    // i en ScrolledWindow ved oprettelsen (se build_*_page funktioner).
+    // Her wrapper vi hele stack i en ydre ScrolledWindow IKKE —
+    // i stedet sikrer vi at hver side har sin egen scroll.
 
     // FEATURE: Hovedvindue med HeaderBar (minimer/maximer/luk knapper).
     // ToolbarView + HeaderBar giver standard window controls.
@@ -293,7 +288,7 @@ fn build_ui(app: &adw::Application) {
     main_header.set_show_start_title_buttons(true);
     main_header.set_show_end_title_buttons(true);
     main_toolbar.add_top_bar(&main_header);
-    main_toolbar.set_content(Some(&stack_scrolled));
+    main_toolbar.set_content(Some(&stack));
 
     // NavigationPage wrapper så split_view stadig virker.
     let content_page = adw::NavigationPage::new(&main_toolbar, "Status");
@@ -1052,6 +1047,18 @@ fn rebuild_backup_list(
     }
 }
 
+
+/// Wrap a page widget in a ScrolledWindow so it can scroll when content overflows.
+/// gtk::Stack itself is not scrollable; each page must handle its own scrolling.
+fn scrollable_page(page: &gtk::Widget) -> gtk::ScrolledWindow {
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(page));
+    scrolled.set_vexpand(true);
+    scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+    scrolled
+}
+
 fn build_status_page(
     state_label: &gtk::Label,
     email_label: &gtk::Label,
@@ -1088,7 +1095,7 @@ fn build_status_page(
     box_.append(usage_label);
     box_.append(level);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
@@ -1098,16 +1105,18 @@ fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.set_child(Some(list));
     scrolled.set_vexpand(true);
+    scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
     box_.append(&scrolled);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn build_sync_page(group: &adw::PreferencesGroup) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
     box_.append(group);
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn replace_add_button(page: &gtk::Widget, new_btn: &gtk::Button) {
@@ -1123,7 +1132,7 @@ fn nav_item(label: &str) -> gtk::Widget {
 fn placeholder(title: &str) -> gtk::Widget {
     let label = gtk::Label::new(Some(&format!("{title} — under udvikling")));
     label.set_vexpand(true);
-    label.upcast()
+    scrollable_page(&label.upcast()).upcast()
 }
 
 /// Parse `jotta-cli ignores list --json` output (backup ignores).
@@ -1743,7 +1752,7 @@ fn build_restore_page(
     box_.append(&trash_title);
     box_.append(trash_group);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 /// Navigation result from a worker thread: plain data only.
