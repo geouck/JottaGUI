@@ -70,7 +70,7 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 6 complete (PR #7 merged)
+## Status: iteration 7 complete (PR #11 merged)
 
 - [x] Workspace + core (28 unit tests green, zero dependencies)
 - [x] Tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (always visible),
@@ -100,26 +100,25 @@ The tray icon switches between 5 named icons based on daemon status:
       labels, chevron icons on dialog rows, "Fjern" button per backup row with
       AlertDialog, "Overførsler" section, filename-only download titles,
       no double-scroll on backup page
+- [x] Transfers page (iteration 7, PR #11): "Overførsler" sidebar entry with
+      active uploads, active downloads, recent errors. 5s poller fetches
+      `list uploads --json` + `list downloads --json`; errors derived from
+      entries via `collect_transfer_errors()`. Error dedup (one toast per
+      unique error). Compact headerbar/windowcontrols via CSS (PRIORITY_USER+1)
 
-### Next: iteration 7 — Transfers page (branch `vibe/iteration7-transfers-errors`)
-
-- [ ] `list uploads --json` + `list downloaderrors` + `list uploaderrors`
-- [ ] Live feed via `observe` (uploads + downloads)
-- [ ] Error dedup (one toast per unique error)
-
-### Later: iteration 8 — Settings/robustness & future features
+### Next: iteration 8 — Settings/robustness (branch `vibe/iteration8-settings-robustness`)
 
 - [ ] **Launch on system startup** toggle (XDG autostart for `jotta-desktop`)
+- [ ] **Daemon-not-responding** state banner ("restart jottad via systemctl --user restart jottad")
+- [ ] **Info page**: device info, jottad/jotta-cli version, subscription, daemon uptime
 - [ ] **Error notifications**: desktop notifications + persistent list in GUI
       (from `list downloaderrors`, `list uploaderrors`, `sync log`)
-- [ ] **Info page**: device info, jottad/jotta-cli version, subscription, daemon uptime
 - [ ] **Advanced settings** (Nextcloud-style): bandwidth limit, scan interval,
       realtime mode, webhook interval (`config set`/`config get`)
 - [ ] **Account page**: subscription plan, usage breakdown, "Log ud" (confirm),
       link to jottacloud.com account settings
 - [ ] **Page consolidation**: evaluate merging Status+Account or Status+Info
-- [ ] Error toasts, snapshot/restore points
-- [ ] Daemon-not-responding state ("restart jottad via systemctl --user restart jottad")
+- [ ] Snapshot/restore points
 
 ### Later: iteration 9 — Flatpak
 

@@ -78,11 +78,11 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - Switch guards: `pause_lockout` (AtomicBool, 15s after user click) prevents the poller from reverting the pause switch before jottad updates status. `pause_updating`/`sync_updating` (Rc<Cell<bool>>) prevent feedback loops from programmatic `set_active()`. RULE: only user action issues commands; the poller NEVER issues commands.
 - Pause switch truth: `status.paused != Some(true)` → ON (running). `None` (unknown) is treated as "running". Initial switch state is ON.
 
-## Current state (iteration 6 + 6o complete, 6o PR pending merge)
+## Current state (iteration 7 complete, PR #11 merged)
 
-- jotta-core: 28 unit tests green. Zero dependencies. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model, remote JSON parsers (`ls --json`, `list downloads --json`), file revisions, download entries.
+- jotta-core: 37 unit tests green. Zero dependencies. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model, remote JSON parsers (`ls --json`, `list downloads --json`, `list uploads --json`), file revisions, download/upload entries, transfer errors (`collect_transfer_errors`).
 - jotta-tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (5 states × 5 sizes). Menu: status, pause/resume (idempotent), "Åbn vindue", "Åbn jottacloud.com", "Afslut". Single-instance via PID file. Spawns GUI via `find_gui_binary()` + reaper thread. Click on icon (`activate()`) opens GUI. Reads minimize-to-tray setting from `~/.config/jotta-desktop/settings.conf`.
-- jotta-gui: GTK4/libadwaita main window. GApplication single-instance (`io.github.eske.JottaDesktop`). Pages: Status (konto-kort, automatisk backup/sync switch, lagerplads-kort), Backup (list, "Tilføj mappe", "Udeluk…" chevron, "Fjern" med AlertDialog), Sync (info, start/stop, selective folder dialog), Gendan/Restore (remote browser "Jottacloud" rod, download dialog, "Overførsler" liste, papirkurv web-knap), Indstillinger (minimize-to-tray switch, default ON). Dynamisk topbar titel. Sidebar med symbolic ikoner + app-titel. Ingen H1-overskrifter i sider. 0 deprecation warnings.
+- jotta-gui: GTK4/libadwaita main window. GApplication single-instance (`io.github.eske.JottaDesktop`). 6 pages: Status (konto-kort, automatisk backup/sync switch, lagerplads-kort), Backup (list, "Tilføj mappe", "Udeluk…" chevron, "Fjern" med AlertDialog), Sync (info, start/stop, selective folder dialog), **Overførsler** (aktive uploads/downloads, seneste fejl, 5s poller, error dedup toasts), Gendan/Restore (remote browser "Jottacloud" rod, download dialog, downloads list, papirkurv web-knap), Indstillinger (minimize-to-tray switch, default ON). Dynamisk topbar titel. Sidebar med symbolic ikoner + app-titel. Ingen H1-overskrifter i sider. 0 deprecation warnings. Kompakt headerbar/windowcontrols via CSS på PRIORITY_USER+1.
 - Data: icon theme (5 states + app icon + symbolic, all hicolor sizes), desktop entries (app + tray autostart), AppStream metainfo, Flatpak manifest (draft).
 
 ## Roadmap (priority order)
@@ -94,7 +94,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 5. ~~Discover real `status --json` schema; tighten parser~~ ✅ Verified against owner's machine
 6. ~~Restore/download flow~~ ✅ Iteration 6 (PR #6)
 7. ~~**Transfers page**~~ ✅ Iteration 7 (PR #11, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloads --json` polled every 5s. Error dedup (one toast per unique error). NOTE: `list downloaderrors`/`list uploaderrors` REQUIRE `--downloadid`/`--uploadid` (no "list all" mode) — errors are derived from the `Errors` object inside each download/upload entry via `collect_transfer_errors()`.
-8. **Settings/robustness** (iteration 8): expand Indstillinger page, error toasts, snapshot/restore points, daemon-not-responding state ("restart jottad via systemctl --user restart jottad") — see "Future features" below for details.
+8. **Settings/robustness** (iteration 8, branch `vibe/iteration8-settings-robustness`): expand Indstillinger page (launch on startup toggle), daemon-not-responding state ("restart jottad via systemctl --user restart jottad"), Info page (device, versions, subscription), error toasts, snapshot/restore points — see "Future features" below for details.
 9. **Flatpak**: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
 
 ### Future features (owner-requested, roadmap additions 2026-06)
@@ -138,8 +138,10 @@ Use this as the opening message when handing the project to a new agent:
 > GTK4/libadwaita GUI (jotta-gui). Begin by reading HANDOFF.md and README.md
 > in the repo root in full — they contain verified jotta-cli facts, hard
 > safety rules, architecture decisions, process rules and a prioritized roadmap.
-> The project is at iteration 6 (complete). Next milestone is roadmap item 7:
-> Transfers page (branch `vibe/iteration7-transfers-errors` from main).
+> The project is at iteration 7 (complete, PR #11 merged). Next milestone is
+> roadmap item 8: Settings/robustness (branch `vibe/iteration8-settings-robustness`
+> from main) — launch on startup, daemon-not-responding state, Info page,
+> error notifications.
 > Never bypass the JottaCommand whitelist, never move sync folders, confirm
 > destructive operations, and keep jotta-core dependency-free.
 > `cargo check -p jotta-gui` MUST be 0 warnings before every push.
