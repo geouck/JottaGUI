@@ -19,11 +19,21 @@ official GUI apps for Windows/macOS; on Linux there is only the CLI.
 ## Verified facts about jotta-cli (learned hands-on, late 2026)
 
 - Daemon: `jottad`, socket at `$XDG_RUNTIME_DIR/jottad/jottad.socket`; the client `jotta-cli` talks to it. `jotta-cli login` FAILS with "Could not connect to jottad" if the daemon is not running.
-- Start/restart daemon: `run_jottad` (wrapper) or `systemctl --user enable --now jottad.service`.
-- Sync commands (NOT `sync enable`): `sync setup --root <path>`, `sync start`, `sync stop`, `sync move`, `sync reset`, `sync selective`, `sync log -n <n>`, `sync trigger`, `sync configure`, `sync diag`.
+- Start/restart daemon: `run_jottad` (wrapper) or `systemctl --user enable --now jottad.service` (Fedora runs jottad as a systemd user unit).
+- Sync commands (NOT `sync enable`): `sync setup --root <path>`, `sync start`, `sync stop`, `sync move`, `sync reset`, `sync selective add|rem|list <folder>`, `sync log -n <n>`, `sync trigger`, `sync configure`, `sync diag`.
+- Sync pause: `config set syncpaused true|false` (per docs.jottacloud.com). The global `pause`/`resume` commands pause jottad entirely (backup + sync).
 - Backup commands: `add <path>`, `rem`, `scan`, `status`, `pause`, `resume`, `observe`, `tail`, `share`, `archive`, `trash`, `download`, `list`.
-- Ignores: `jotta-cli ignores add --pattern PAT [--backup NAME]`, gitignore-style patterns, relative to backup root. `ignores test --pattern P --path X` validates before adding. WARNING: adding a pattern REMOVES already-backed-up matching files (they go to Trash).
-- `--json` output exists for status; the schema is NOT formally documented - hence the tolerant parser in jotta-core.
+- `pause` REQUIRES a duration argument: `jotta-cli pause 87600h` (10 years = effectively indefinite). `jotta-cli pause` without duration fails: "ERROR You need to provide one or more additional arguments".
+- `resume` is idempotent-ish: calling it when already running fails with "ERROR already running" (exit code 1) — treat this as success in the GUI.
+- Ignores: `jotta-cli ignores add --pattern PAT [--backup NAME]`, `ignores rem --pattern PAT [--backup NAME]`, `ignores list [--backup NAME]`. Gitignore-style patterns, relative to backup root. `ignores test --pattern P --path X` validates before adding. WARNING: adding a pattern REMOVES already-backed-up matching files (they go to Trash).
+- `--json` output exists for: `status`, `ls <path>`, `ignores list`, `sync selective list`, `list downloads`. The schema is NOT formally documented — hence the tolerant parser in jotta-core.
+- `ls <path> --json` schemas (verified): folder → `{"Folders": [{"Name","Path","Modified","Size"?}]}` + optional `{"Files": [{"Name","Path","Checksum","Size","Created","Modified"}]}`; file → `{"revisions": [{"id","size","checksum","createdAtMillis","modifiedAtMillis"}]}`. Casing is inconsistent ("Folders" vs "revisions") — parser must be case-tolerant. `Size` is optional on folders.
+- `list downloads --json` schema (verified): array of `{"Id","Remote","Local","Total":{"Files","Bytes"},"Remaining":{},"CompletedTimeMs","StartedTimeMs","SelectionCount":{},"Errors":{}}`. Empty objects are common — parser must tolerate.
+- `trash list` has NO `--json` flag. Plain output is a single space-separated line (unparseable). Trash UI is web-only.
+- `ls Backup --json` lists ALL devices including dead/ghost ones ("Cannot find device") — browser must handle gracefully.
+- `download <remote> <dest> [--merge]`: `--merge` is only valid for folder sources (not files). The CLI prompts interactively if the destination file exists — the GUI must check and confirm BEFORE issuing the command (no TTY in spawned process).
+- `list` subcommands: `downloads` (has `--json`), `uploads` (expected `--json` for iteration 7), `downloaderrors --downloadid=<id>`, `uploaderrors`.
+- `status --json` does NOT reliably include a `paused` field. When paused is unknown (`None`), assume "running" (not paused).
 - RPM repo: `https://repo.jotta.cloud/redhat` (gpgkey `https://repo.jotta.cloud/jotta.gpg`, binary format - import via `gpg --enarmor` or let dnf import it from the repo file's gpgkey directive).
 
 ## Hard safety rules (encode in the GUI)
@@ -41,25 +51,44 @@ official GUI apps for Windows/macOS; on Linux there is only the CLI.
 - `jotta-gui` uses gtk4-rs + libadwaita (adw::Leaflet sidebar layout, app id `io.github.eske.JottaDesktop`).
 - Model B: `DaemonSupervisor` spawns the bundled `jottad` only if the socket is absent; otherwise it reuses the host daemon (`stop_if_owned` only kills our own child).
 - CLI calls go through the `JottaCommand` enum -> `argv()` whitelist. The GUI must NEVER shell out with raw strings.
-- Process model: `jotta-tray` autostarts at login (XDG autostart .desktop) and runs persistently as the always-on background process. `jotta-desktop` (GUI) is launched on demand — from the tray menu ("Åbn vindue"), the app menu, or the .desktop file. The GUI is a GApplication single-instance (application_id `io.github.eske.JottaDesktop`): a second launch activates the existing window instead of opening a new one. When the last GUI window closes, `connect_window_removed` sets a shutdown AtomicBool, the 3s status poller checks it and terminates, and `app.quit()` ends the GTK main loop — the process exits cleanly. The tray keeps running independently.
+- Process model: `jotta-tray` autostarts at login (XDG autostart .desktop) and runs persistently as the always-on background process. `jotta-desktop` (GUI) is launched on demand — from the tray menu ("Åbn vindue"), tray icon click (`activate()`), the app menu, or the .desktop file. The GUI is a GApplication single-instance (application_id `io.github.eske.JottaDesktop`): `connect_activate` checks `app.active_window()` and presents the existing window instead of building a new one.
+- Minimize-to-tray (default ON): closing the GUI window hides it (`window.set_visible(false)` + `Propagation::Stop`) instead of terminating. The setting lives in `~/.config/jotta-desktop/settings.conf` (`minimize_to_tray=true|false`). The tray reads the same file: "Afslut" in the tray menu sends SIGTERM to the GUI (via `$XDG_RUNTIME_DIR/jotta-gui.pid`) when minimize-to-tray is active.
+- Shutdown: when minimize-to-tray is OFF, `connect_close_request` calls `std::process::exit(0)` directly (not `app.quit()` — that can hang the GApplication main loop).
+- Single-instance for tray: PID file at `$XDG_RUNTIME_DIR/jotta-tray.pid`. Both GUI and tray write PID files; tray exits if another live tray is found. GUI's `ensure_tray_running()` spawns tray as a detached child if the PID file is stale/missing.
+- Zombie prevention: both `spawn_gui()` (tray) and `ensure_tray_running()` (GUI) spawn children inside a `std::thread` that calls `child.wait()` — acts as reaper, prevents `<defunct>` zombies.
+- Tray icon: uses embedded ARGB32 pixmap data (`icon_pixmap()` in ksni) generated from the PNG icons — visible even when the icon theme path is not resolved by the host DE. Source: `crates/jotta-tray/src/pixmaps.rs` (auto-generated, do not hand-edit).
+- Tray binary lookup: `find_gui_binary()` looks for `jotta-desktop` next to the tray binary first, then falls back to PATH. Same pattern for `ensure_tray_running()` finding `jotta-tray`.
+- Switch guards: `pause_lockout` (AtomicBool, 15s after user click) prevents the poller from reverting the pause switch before jottad updates status. `pause_updating`/`sync_updating` (Rc<Cell<bool>>) prevent feedback loops from programmatic `set_active()`. RULE: only user action issues commands; the poller NEVER issues commands.
+- Pause switch truth: `status.paused != Some(true)` → ON (running). `None` (unknown) is treated as "running". Initial switch state is ON.
 
-## Current state (iteration 1, pushed to this repo)
+## Current state (iteration 6 complete, merged to main)
 
-- jotta-core: compiles clean (`cargo check` verified in a sandbox), JSON parser + CLI wrapper + daemon supervisor + status state machine, with unit tests (NOT yet executed - the authoring sandbox cannot link test binaries; run `cargo test -p jotta-core` on a real machine).
-- jotta-tray: MVP (status tooltip, pause/resume, open web, quit; 3s polling).
-- jotta-gui: skeleton (sidebar, status/backup/sync pages, TODO markers where handlers go).
-- flatpak manifest: draft, jotta-cli source URL needs a pinned version + sha256.
+- jotta-core: 28 unit tests green. Zero dependencies. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model, remote JSON parsers (`ls --json`, `list downloads --json`), file revisions, download entries.
+- jotta-tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (5 states × 5 sizes). Menu: status, pause/resume (idempotent), "Åbn vindue", "Åbn jottacloud.com", "Afslut". Single-instance via PID file. Spawns GUI via `find_gui_binary()` + reaper thread. Click on icon (`activate()`) opens GUI. Reads minimize-to-tray setting from `~/.config/jotta-desktop/settings.conf`.
+- jotta-gui: GTK4/libadwaita main window. GApplication single-instance (`io.github.eske.JottaDesktop`). Pages: Status (live state, email, usage bar, pause switch), Backup (list, add folder, per-backup ignores), Sync (info, start/stop, selective folder dialog), Gendan/Restore (remote browser via `ls --json`, download dialog, downloads list with abort/retry), Indstillinger (minimize-to-tray switch). Minimize-to-tray default ON. Clean shutdown via `std::process::exit(0)`. Auto-spawns tray if not running. 0 deprecation warnings.
+- Data: icon theme (5 states + app icon + symbolic, all hicolor sizes), desktop entries (app + tray autostart), AppStream metainfo, Flatpak manifest (draft).
 
 ## Roadmap (priority order)
 
-1. Run `cargo test -p jotta-core` on a real machine; fix any failures.
-2. Compile tray+GUI on Fedora (`dnf install cargo rust gtk4-devel libadwaita-devel`); the gtk4-rs/libadwaita versions in Cargo.toml may need pinning to what Fedora 42+ ships.
-3. Wire GUI handlers: backup list (`BackupsList`), FileChooser -> `BackupAdd`, sync switch -> `SyncStart`/`SyncStop`, ignore-pattern editor (`IgnoreAdd`/`IgnoreRemove`/`IgnoresList`).
-4. Icon theme: 5 named icons (jotta-desktop-idle/-syncing/-paused/-attention/-offline) referenced by jotta-tray.
-5. Discover the real `status --json` schema on Eske's machine (`jotta-cli status --json | jq .`) and tighten `Status::from_json`.
-6. Restore/download flow (`jotta-cli download`).
-7. Flatpak: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
-8. Later: i18n (da/en), COPR + AUR packaging, KSNI menu enhancements (device list, activity).
+1. ~~Run `cargo test -p jotta-core`; fix failures~~ ✅ 28/28 green
+2. ~~Compile tray+GUI on Fedora~~ ✅ Verified by owner
+3. ~~Wire GUI handlers (backup, sync, ignores)~~ ✅ Iterations 3+5
+4. ~~Icon theme (5 states + symbolic)~~ ✅ Iteration 4
+5. ~~Discover real `status --json` schema; tighten parser~~ ✅ Verified against owner's machine
+6. ~~Restore/download flow~~ ✅ Iteration 6 (PR #6)
+7. **Transfers page** (iteration 7, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloaderrors` + `list uploaderrors` + live feed via `observe`. Error dedup (one toast per unique error).
+8. **Settings/robustness** (iteration 8): more settings in Indstillinger page, error toasts, snapshot/restore points, daemon-not-responding state ("restart jottad via systemctl --user restart jottad").
+9. **Flatpak**: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
+10. Later: i18n (da/en), COPR + AUR packaging, tray icon color (black/white like Nextcloud), "gendan gammel version" UI (revisions parsed but no UI yet), KSNI menu enhancements (device list, activity).
+
+### Process rules (established during iterations 6f–6n)
+- `cargo check -p jotta-gui` MUST be 0 warnings before every push.
+- Shadow-clone rule: `let x = x.clone(); move closure` ONLY for the LAST use of a value. One clone per closure, BEFORE move.
+- Threading: worker threads own ONLY plain data (String, PathBuf, CliClient, mpsc::Sender). No GTK widgets or Rc<RefCell<…>> cross thread boundaries. Results via mpsc + `glib::idle_add_local`.
+- Switch guards: poller NEVER issues commands. Only user action does. Use `Rc<Cell<bool>>` for programmatic-update guards, `Arc<AtomicBool>` for cross-thread lockouts.
+- Spawned children: always spawn in a `std::thread` that calls `child.wait()` (reaper pattern) to prevent zombies.
+- `std::process::exit(0)` for guaranteed termination (not `app.quit()` which can hang).
+- Tray binary lookup: same directory as current binary first, then PATH.
 
 ## Working agreement with the owner
 
@@ -75,11 +104,12 @@ Use this as the opening message when handing the project to a new agent:
 > a Rust cross-desktop client for Jottacloud (KDE/GNOME/COSMIC) with a
 > zero-dependency core (jotta-core), a ksni tray icon (jotta-tray) and a
 > GTK4/libadwaita GUI (jotta-gui). Begin by reading HANDOFF.md and README.md
-> in the repo root in full - they contain verified jotta-cli facts, hard
-> safety rules, architecture decisions and a prioritized roadmap.
-> Your first milestone is roadmap items 1-2: run `cargo test -p jotta-core`
-> and build the tray+GUI on the owner's Fedora KDE machine, then wire the GUI
-> handlers (roadmap item 3). Never bypass the JottaCommand whitelist, never
-> move sync folders, confirm destructive operations, and keep jotta-core
-> dependency-free. The owner speaks Danish - keep UI strings Danish for now.
+> in the repo root in full — they contain verified jotta-cli facts, hard
+> safety rules, architecture decisions, process rules and a prioritized roadmap.
+> The project is at iteration 6 (complete). Next milestone is roadmap item 7:
+> Transfers page (branch `vibe/iteration7-transfers-errors` from main).
+> Never bypass the JottaCommand whitelist, never move sync folders, confirm
+> destructive operations, and keep jotta-core dependency-free.
+> `cargo check -p jotta-gui` MUST be 0 warnings before every push.
+> The owner speaks Danish — keep UI strings Danish for now.
 > Report back with what compiles, what tests pass, and what you changed.
