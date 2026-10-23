@@ -95,15 +95,29 @@ The tray icon switches between 5 named icons based on daemon status:
 - [x] `list downloads --json` parsed (tolerant of empty objects)
 - [x] Trash: web-only UI (`trash list` has no `--json`, output unparseable)
 
+- [x] UI polish (iteration 6o): dynamic topbar title, sidebar with symbolic icons +
+      app title, no H1 headings in pages, PreferencesGroup layout, positive switch
+      labels, chevron icons on dialog rows, "Fjern" button per backup row with
+      AlertDialog, "Overførsler" section, filename-only download titles,
+      no double-scroll on backup page
+
 ### Next: iteration 7 — Transfers page (branch `vibe/iteration7-transfers-errors`)
 
 - [ ] `list uploads --json` + `list downloaderrors` + `list uploaderrors`
 - [ ] Live feed via `observe` (uploads + downloads)
 - [ ] Error dedup (one toast per unique error)
 
-### Later: iteration 8 — Settings/robustness
+### Later: iteration 8 — Settings/robustness & future features
 
-- [ ] More settings in Indstillinger page
+- [ ] **Launch on system startup** toggle (XDG autostart for `jotta-desktop`)
+- [ ] **Error notifications**: desktop notifications + persistent list in GUI
+      (from `list downloaderrors`, `list uploaderrors`, `sync log`)
+- [ ] **Info page**: device info, jottad/jotta-cli version, subscription, daemon uptime
+- [ ] **Advanced settings** (Nextcloud-style): bandwidth limit, scan interval,
+      realtime mode, webhook interval (`config set`/`config get`)
+- [ ] **Account page**: subscription plan, usage breakdown, "Log ud" (confirm),
+      link to jottacloud.com account settings
+- [ ] **Page consolidation**: evaluate merging Status+Account or Status+Info
 - [ ] Error toasts, snapshot/restore points
 - [ ] Daemon-not-responding state ("restart jottad via systemctl --user restart jottad")
 
@@ -111,6 +125,14 @@ The tray icon switches between 5 named icons based on daemon status:
 
 - [ ] Pin jotta-cli version + sha256, get Jottacloud permission to bundle
 - [ ] Flathub submission + AppStream metadata finalization
+
+### Even later
+
+- [ ] i18n (da/en)
+- [ ] COPR + AUR packaging
+- [ ] Tray icon color (black/white, Nextcloud-style)
+- [ ] "Gendan gammel version" UI (revisions parsed, no UI yet)
+- [ ] KSNI menu enhancements (device list, activity)
 
 ## License
 MPL-2.0
