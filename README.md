@@ -70,17 +70,26 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 4
+## Status: iteration 6
 
-- [x] Workspace + core (15 unit tests green)
+- [x] Workspace + core (25 unit tests green)
 - [x] Tray: status tooltip, pause/resume, open web, quit; 3s polling; ksni 0.3
 - [x] GUI: live status page (state, email, usage bar, pause/resume),
       backup list + add folder (FileDialog), sync info + start/stop (confirmed)
 - [x] Status parser verified against real `jotta-cli status --json` output
 - [x] Icon theme: 5 state icons + app icon + symbolic, all hicolor sizes
 - [x] Desktop entries + AppStream metainfo
-- [ ] GUI: ignore-pattern editor (roadmap item 3 remainder)
-- [ ] Restore/download flow (`jotta-cli download`)
+- [x] GUI: sync selective (checkbox dialog, non-destructive) + backup ignores
+      (per-backup "Udeluk…" dialog, destructive warning on add)
+- [x] Restore/download flow: remote browser (Backup/Archive/Sync via `ls --json`),
+      download dialog (FileDialog -> `download`), downloads list
+      (`list downloads --json`, abort/retry), file revisions (`ls <file> --json`),
+      trash web-only (no list UI — `trash list` has no `--json`)
+- [x] All remote-browsing uses `ls --json` with case-tolerant parsers
+      (real fixtures: Size optional, casing inconsistent Folders/revisions)
+- [ ] Transfers page: `list uploads --json` + `list downloaderrors` + `list uploaderrors`
+      + live feed (iteration 7)
+- [ ] Settings/robustness: migration to adw::Dialog, error toasts, snapshot (iteration 8)
 - [ ] Flathub manifest finalized + jotta-cli bundling (needs Jottacloud's OK)
 
 ## License

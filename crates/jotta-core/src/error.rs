@@ -4,7 +4,8 @@ use std::fmt;
 #[derive(Debug)]
 pub enum Error {
     /// jotta-cli exited with a non-zero exit code.
-    CommandFailed { program: String, code: i32, stderr: String },
+    /// `argv` is the full argument vector (excluding the binary) for debugging.
+    CommandFailed { program: String, argv: Vec<String>, code: i32, stderr: String },
     /// A command could not be spawned (missing binary, etc.).
     Spawn(String, std::io::Error),
     /// JSON could not be parsed or did not have the expected shape.
@@ -18,9 +19,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::CommandFailed { program, code, stderr } => write!(
+            Error::CommandFailed { program, argv, code, stderr } => write!(
                 f,
-                "`{program}` exited with code {code}: {}",
+                "`{program} {}` exited with code {code}: {}",
+                argv.join(" "),
                 stderr.trim()
             ),
             Error::Spawn(program, io) => write!(f, "could not spawn `{program}`: {io}"),

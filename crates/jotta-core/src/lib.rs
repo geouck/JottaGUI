@@ -10,11 +10,13 @@
 //! - `cli`: typed wrapper around the `jotta-cli` binary (Model B: we ship it).
 //! - `daemon`: supervision of the bundled `jottad` daemon (start/stop/wait).
 //! - `status`: tolerant extraction of status information from JSON.
+//! - `remote`: tolerant parsers for `jotta-cli ls`/`list downloads`/`trash ls`.
 
 pub mod cli;
 pub mod daemon;
 pub mod error;
 pub mod json;
+pub mod remote;
 pub mod status;
 
 pub use error::{Error, Result};

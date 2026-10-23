@@ -14,6 +14,7 @@ use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
 use jotta_core::status::{State, Status};
 use libadwaita as adw;
 use libadwaita::prelude::*;
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -100,6 +101,7 @@ fn build_ui(app: &adw::Application) {
     sidebar.append(&nav_item("Status"));
     sidebar.append(&nav_item("Backup"));
     sidebar.append(&nav_item("Sync"));
+    sidebar.append(&nav_item("Gendan"));
     sidebar.append(&nav_item("Indstillinger"));
 
     let stack = gtk::Stack::new();
@@ -167,6 +169,72 @@ fn build_ui(app: &adw::Application) {
     let sync_page = build_sync_page(&sync_group);
     stack.add_titled(&sync_page, Some("sync"), "Sync");
 
+    // --- Gendan (restore/download) page ---
+    // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
+    // Trash is web-only (trash list has no --json, plain output is unparseable).
+    let restore_path_label = gtk::Label::new(Some("Backup / Archive / Sync"));
+    restore_path_label.set_halign(gtk::Align::Start);
+    restore_path_label.add_css_class("dim-label");
+    restore_path_label.set_wrap(true);
+    let restore_path_up_btn = gtk::Button::from_icon_name("go-up-symbolic");
+    restore_path_up_btn.add_css_class("flat");
+    restore_path_up_btn.set_tooltip_text(Some("En mappe op"));
+    restore_path_up_btn.set_valign(gtk::Align::Center);
+    let restore_refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
+    restore_refresh_btn.add_css_class("flat");
+    restore_refresh_btn.set_tooltip_text(Some("Genindlæs"));
+    restore_refresh_btn.set_valign(gtk::Align::Center);
+    let restore_path_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    restore_path_box.append(&restore_path_up_btn);
+    restore_path_box.append(&restore_path_label);
+    restore_path_box.append(&restore_refresh_btn);
+
+    let restore_list = gtk::ListBox::new();
+    restore_list.add_css_class("boxed-list");
+    // BUG 5 fix: enkeltklik = markér, dobbeltklik = åbn (standard-UX).
+    restore_list.set_activate_on_single_click(false);
+    let restore_scrolled = gtk::ScrolledWindow::new();
+    restore_scrolled.set_child(Some(&restore_list));
+    restore_scrolled.set_vexpand(true);
+    restore_scrolled.set_min_content_height(200);
+
+    let restore_download_btn = gtk::Button::with_label("Download valgte…");
+    restore_download_btn.add_css_class("suggested-action");
+    let restore_download_row = adw::ActionRow::builder()
+        .title("Download")
+        .subtitle("Hent valgte filer eller mapper til en lokal mappe")
+        .build();
+    restore_download_row.add_suffix(&restore_download_btn);
+    let restore_group = adw::PreferencesGroup::new();
+    restore_group.add(&restore_download_row);
+
+    let restore_downloads_list = gtk::ListBox::new();
+    restore_downloads_list.add_css_class("boxed-list");
+    let restore_downloads_group = adw::PreferencesGroup::builder()
+        .title("Aktive downloads")
+        .build();
+
+    // Trash: web-only (trash list has no --json, plain output unparseable).
+    let restore_trash_web_btn = gtk::Button::with_label("Åbn papirkurv på web…");
+    restore_trash_web_btn.add_css_class("flat");
+    let restore_trash_row = adw::ActionRow::builder()
+        .title("Papirkurv")
+        .subtitle("Gendan eller slet filer permanent på jottacloud.com (åbner i browser)")
+        .build();
+    restore_trash_row.add_suffix(&restore_trash_web_btn);
+    let restore_trash_group = adw::PreferencesGroup::new();
+    restore_trash_group.add(&restore_trash_row);
+
+    let restore_page = build_restore_page(
+        &restore_path_box,
+        &restore_scrolled,
+        &restore_group,
+        &restore_downloads_group,
+        &restore_downloads_list,
+        &restore_trash_group,
+    );
+    stack.add_titled(&restore_page, Some("restore"), "Gendan");
+
     stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
@@ -181,6 +249,7 @@ fn build_ui(app: &adw::Application) {
                             "Status" => Some("status"),
                             "Backup" => Some("backup"),
                             "Sync" => Some("sync"),
+                            "Gendan" => Some("restore"),
                             "Indstillinger" => Some("settings"),
                             _ => None,
                         };
@@ -211,31 +280,54 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toast_overlay));
 
     // --- Wire handlers ---
-    let toast_tx_pause = toast_tx.clone();
-    pause_switch.connect_state_set(move |_sw, state| {
-        let cmd = if state {
-            JottaCommand::Resume
-        } else {
-            JottaCommand::Pause
-        };
-        if let Some(loc) = BinaryLocator::from_path() {
-            let client = CliClient::new(loc);
-            let tx = toast_tx_pause.clone();
+    // Guards: når polleren opdaterer switches programmatisk, sættes guard=true
+    // så connect_state_set-handleren returnerer tidligt uden at udstede kommandoer.
+    // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
+    let pause_updating = std::rc::Rc::new(Cell::new(false));
+    let sync_updating = std::rc::Rc::new(Cell::new(false));
+
+    // Pause switch: bruger-toggle → Pause/Resume kommando.
+    // Ved fejl: revert switch (blocked handler) + ÉN toast. Ingen auto-retry.
+    {
+        let pause_updating = pause_updating.clone();
+        let pause_switch = pause_switch.clone();
+        let toast_tx = toast_tx.clone();
+        pause_switch.connect_state_set(move |_sw, state| {
+            // Guard: programmatisk opdatering fra polleren — gør ingenting.
+            if pause_updating.get() {
+                return Propagation::Proceed;
+            }
+            let cmd = if state {
+                JottaCommand::Resume
+            } else {
+                JottaCommand::Pause
+            };
+            let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
-                if let Err(e) = client.run(&cmd) {
-                    let _ = tx.send(format!("Kunne ikke ændre pause: {e}"));
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    if let Err(e) = client.run(&cmd) {
+                        // Fejl: ÉN toast. Switch reverteres ved næste poll
+                        // (status uændret → poller sætter den tilbage).
+                        let _ = toast_tx.send(format!("Kunne ikke ændre pause: {e}"));
+                    }
                 }
             });
-        }
-        Propagation::Proceed
-    });
+            Propagation::Proceed
+        });
+    }
 
     // Sync switch: ON = sync running (SyncStart), OFF = stopped (SyncStop).
     // Destructive: stopping sync is confirmed (safety rule 3).
     {
         let window = window.clone();
         let sync_switch = sync_switch.clone();
+        let sync_updating = sync_updating.clone();
         sync_switch.connect_state_set(move |sw, state| {
+            // Guard: programmatisk opdatering fra polleren — gør ingenting.
+            if sync_updating.get() {
+                return Propagation::Proceed;
+            }
             if !state {
                 // Turning OFF: confirm before stopping sync.
                 let dialog = adw::AlertDialog::new(
@@ -249,12 +341,15 @@ fn build_ui(app: &adw::Application) {
                 dialog.set_close_response("cancel");
                 let sw2 = sw.clone();
                 let window = window.clone();
+                let sync_updating = sync_updating.clone();
                 dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
                     if resp == "stop" {
                         run_cli(JottaCommand::SyncStop);
                     } else {
-                        // Revert the switch.
+                        // Revert the switch (blocked handler — ingen kommando).
+                        sync_updating.set(true);
                         sw2.set_active(true);
+                        sync_updating.set(false);
                     }
                 });
                 return Propagation::Stop;
@@ -305,6 +400,369 @@ fn build_ui(app: &adw::Application) {
         },
     ));
 
+    // --- Gendan page: remote browser state + handlers ---
+    // Current remote path being browsed (main thread only, never crosses threads).
+    let restore_current_path = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    // Selected entry in the remote list (main thread only).
+    let restore_selected = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    // Whether the selected entry is a directory (main thread only).
+    let restore_selected_is_dir = std::rc::Rc::new(std::cell::Cell::new(true));
+
+    // Initial load: show static root (Backup / Archive / Sync).
+    // No worker thread needed — this is static data applied directly.
+    {
+        let entries = [
+            ("Backup", "Enheder med backup"),
+            ("Archive", "Arkiverede filer"),
+            ("Sync", "Synkroniseret mappe"),
+        ];
+        for (name, desc) in entries {
+            let row = adw::ActionRow::builder()
+                .title(name)
+                .subtitle(&format!("Mappe — {desc}"))
+                .build();
+            let img = gtk::Image::from_icon_name("folder-symbolic");
+            row.add_prefix(&img);
+            row.set_activatable(true);
+            restore_list.append(&row);
+        }
+        restore_path_label.set_text("Backup / Archive / Sync");
+    }
+
+    // Row selected in remote list -> update selection (main thread only).
+    restore_list.connect_row_selected(clone!(
+        #[strong]
+        restore_selected,
+        #[strong]
+        restore_selected_is_dir,
+        move |_, row| {
+            if let Some(row) = row {
+                if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
+                    let name = action_row.title().to_string();
+                    let subtitle = action_row.subtitle().unwrap_or_default();
+                    *restore_selected.borrow_mut() = name;
+                    // "Mappe —" prefix means directory; "Fil —" means file.
+                    restore_selected_is_dir.set(subtitle.starts_with("Mappe"));
+                }
+            } else {
+                restore_selected.borrow_mut().clear();
+            }
+        },
+    ));
+
+    // Double-click / activate row -> navigate into directory or show file revisions.
+    // Worker thread fetches JSON listing; result via mpsc + idle_add_local.
+    // Channel carries LsResult (plain data: Folders / Revisions / Empty + error string).
+    restore_list.connect_row_activated(clone!(
+        #[strong]
+        restore_current_path,
+        #[strong]
+        restore_list,
+        #[strong]
+        restore_path_label,
+        #[strong]
+        restore_selected,
+        move |_, row| {
+            if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
+                let name = action_row.title().to_string();
+                let subtitle = action_row.subtitle().unwrap_or_default();
+                let is_dir = subtitle.starts_with("Mappe");
+                // Ghost device: subtitle starts with "Offline enhed" — not navigable.
+                let is_ghost = subtitle.starts_with("Offline enhed");
+                if is_ghost {
+                    return; // graceful: no navigation into dead devices
+                }
+                if is_dir {
+                    let new_path = if restore_current_path.borrow().is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", restore_current_path.borrow(), name)
+                    };
+                    *restore_current_path.borrow_mut() = new_path.clone();
+                    restore_path_label.set_text(&new_path);
+                    *restore_selected.borrow_mut() = String::new();
+
+                    let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
+                    let data_rx = Arc::new(Mutex::new(data_rx));
+                    let list = restore_list.clone();
+                    let sel = restore_selected.clone();
+                    glib::idle_add_local(move || {
+                        let rx = data_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(result) => {
+                                rebuild_remote_list_result(&list, &result, &sel);
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+
+                    let path = new_path.clone();
+                    std::thread::spawn(move || {
+                        if let Some(loc) = BinaryLocator::from_path() {
+                            let client = CliClient::new(loc);
+                            let result = match client.run_json(&JottaCommand::LsRemote(path)) {
+                                Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                                Err(e) => LsNavResult::Error(format!("{e}")),
+                            };
+                            let _ = data_tx.send(result);
+                        }
+                    });
+                } else {
+                    // File: fetch revisions (for future "gendan gammel version" feature).
+                    let file_path = if restore_current_path.borrow().is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", restore_current_path.borrow(), name)
+                    };
+                    let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
+                    let data_rx = Arc::new(Mutex::new(data_rx));
+                    let list = restore_list.clone();
+                    let sel = restore_selected.clone();
+                    let path_label = restore_path_label.clone();
+                    glib::idle_add_local(move || {
+                        let rx = data_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(result) => {
+                                rebuild_remote_list_result(&list, &result, &sel);
+                                // Show path in label so user sees where revisions are.
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+                    let path = file_path.clone();
+                    std::thread::spawn(move || {
+                        if let Some(loc) = BinaryLocator::from_path() {
+                            let client = CliClient::new(loc);
+                            let result = match client.run_json(&JottaCommand::LsRemote(path)) {
+                                Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                                Err(e) => LsNavResult::Error(format!("{e}")),
+                            };
+                            let _ = data_tx.send(result);
+                        }
+                    });
+                    let _ = path_label;
+                }
+            }
+        },
+    ));
+
+    // "En mappe op" button.
+    {
+        let current_path = restore_current_path.clone();
+        let list = restore_list.clone();
+        let path_label = restore_path_label.clone();
+        let sel = restore_selected.clone();
+        restore_path_up_btn.connect_clicked(move |_| {
+            let cur = current_path.borrow().clone();
+            if cur.is_empty() {
+                return; // already at root
+            }
+            let parent = match cur.rfind('/') {
+                Some(idx) => cur[..idx].to_string(),
+                None => String::new(),
+            };
+            *current_path.borrow_mut() = parent.clone();
+            if parent.is_empty() {
+                path_label.set_text("Backup / Archive / Sync");
+            } else {
+                path_label.set_text(&parent);
+            }
+            *sel.borrow_mut() = String::new();
+
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
+            let data_rx = Arc::new(Mutex::new(data_rx));
+            let list_r = list.clone();
+            let sel_r = sel.clone();
+            glib::idle_add_local(move || {
+                let rx = data_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(result) => {
+                        rebuild_remote_list_result(&list_r, &result, &sel_r);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+
+            let path = parent.clone();
+            std::thread::spawn(move || {
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let result = if path.is_empty() {
+                        // Root: static entries.
+                        LsNavResult::Root
+                    } else {
+                        match client.run_json(&JottaCommand::LsRemote(path)) {
+                            Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                            Err(e) => LsNavResult::Error(format!("{e}")),
+                        }
+                    };
+                    let _ = data_tx.send(result);
+                }
+            });
+        });
+    }
+
+    // Refresh button.
+    {
+        let current_path = restore_current_path.clone();
+        let list = restore_list.clone();
+        let sel = restore_selected.clone();
+        restore_refresh_btn.connect_clicked(move |_| {
+            let path = current_path.borrow().clone();
+
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
+            let data_rx = Arc::new(Mutex::new(data_rx));
+            let list_r = list.clone();
+            let sel_r = sel.clone();
+            glib::idle_add_local(move || {
+                let rx = data_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(result) => {
+                        rebuild_remote_list_result(&list_r, &result, &sel_r);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+
+            let path = path.clone();
+            std::thread::spawn(move || {
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let result = if path.is_empty() {
+                        LsNavResult::Root
+                    } else {
+                        match client.run_json(&JottaCommand::LsRemote(path)) {
+                            Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                            Err(e) => LsNavResult::Error(format!("{e}")),
+                        }
+                    };
+                    let _ = data_tx.send(result);
+                }
+            });
+        });
+    }
+
+    // Download selected -> FileDialog for destination -> Download command.
+    // BUG 4 fix: --merge er KUN gyldigt for mappe-kilder. Fil-kilde + --merge
+    // giver "ERROR PathIsFile: not found". GUI sætter merge=false altid (bruger
+    // kan ikke vælge --merge i denne iteration).
+    // NY FAKTA 1: CLI spørger interaktivt ved eksisterende destinationsfil.
+    // GUI-spawn har ingen TTY -> vi tjekker selv og viser egen bekræftelse.
+    {
+        let window = window.clone();
+        let current_path = restore_current_path.clone();
+        let sel = restore_selected.clone();
+        let sel_is_dir = restore_selected_is_dir.clone();
+        let toast_tx = toast_tx.clone();
+        restore_download_btn.connect_clicked(move |_| {
+            let selected = sel.borrow().clone();
+            if selected.is_empty() {
+                let _ = toast_tx.send("Vælg en fil eller mappe først".to_string());
+                return;
+            }
+            let remote_path = if current_path.borrow().is_empty() {
+                selected.clone()
+            } else {
+                format!("{}/{}", current_path.borrow(), selected)
+            };
+            let is_dir = sel_is_dir.get();
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Vælg download-destination");
+            dialog.set_modal(true);
+            dialog.set_accept_label(Some("Vælg"));
+            let window_cb = window.clone();
+            let window_alert = window.clone();
+            let toast_tx = toast_tx.clone();
+            dialog.select_folder(Some(&window_cb), None::<&gtk::gio::Cancellable>, move |res| {
+                match res {
+                    Ok(folder) => {
+                        if let Some(dest) = folder.path() {
+                            // NY FAKTA 1: Tjek om destinationsfilen findes.
+                            // CLI'en ville spørge interaktivt — GUI har ingen TTY.
+                            let dest_file = dest.join(&selected);
+                            if !is_dir && dest_file.exists() {
+                                // Vis egen bekræftelsesdialog før kommandoen.
+                                let alert = adw::AlertDialog::new(
+                                    Some("Erstat eksisterende fil?"),
+                                    Some(&format!(
+                                        "Filen „{selected}“ findes allerede i {}.
+
+Vil du erstatte den?",
+                                        dest.display()
+                                    )),
+                                );
+                                alert.add_response("cancel", "Annuller");
+                                alert.add_response("replace", "Erstat");
+                                alert.set_response_appearance(
+                                    "replace",
+                                    adw::ResponseAppearance::Destructive,
+                                );
+                                alert.set_default_response(Some("cancel"));
+                                alert.set_close_response("cancel");
+                                let window = window_alert.clone();
+                                let remote_path = remote_path.clone();
+                                let dest = dest.clone();
+                                let toast_tx = toast_tx.clone();
+                                alert.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
+                                    if resp == "replace" {
+                                        start_download(remote_path, dest, toast_tx);
+                                    }
+                                    // cancel: gør ingenting
+                                });
+                            } else {
+                                start_download(remote_path, dest, toast_tx);
+                            }
+                        }
+                    }
+                    Err(_) => {} // user cancelled
+                }
+            });
+        });
+    }
+
+    // Downloads list: load on startup (worker sends plain data, main thread rebuilds).
+    {
+        let list = restore_downloads_list.clone();
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::DownloadEntry>>();
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        glib::idle_add_local(move || {
+            let rx = data_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(entries) => {
+                    rebuild_downloads_list(&list, &entries);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                if let Ok(v) = client.run_json(&JottaCommand::ListDownloads) {
+                    let entries = jotta_core::remote::parse_downloads_json(&v);
+                    let _ = data_tx.send(entries);
+                }
+            }
+        });
+    }
+
+    // Trash: web-only button — opens jottacloud.com trash in browser.
+    // `trash list` has no --json and plain output is unparseable (single
+    // space-separated line with filenames containing spaces).
+    restore_trash_web_btn.connect_clicked(move |_| {
+        // gtk::show_uri returns () in gtk4-rs 0.9 (not Result).
+        gtk::show_uri(None::<&gtk::Window>, "https://www.jottacloud.com/web/trash", 0);
+    });
+
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
@@ -315,8 +773,10 @@ fn build_ui(app: &adw::Application) {
         level: status_level.clone(),
         usage_label: status_usage_label.clone(),
         pause_switch: pause_switch.clone(),
+        pause_updating: pause_updating.clone(),
         backup_list: backup_list.clone(),
         sync_switch: sync_switch.clone(),
+        sync_updating: sync_updating.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
         toast_tx: toast_tx.clone(),
@@ -366,8 +826,13 @@ struct StatusWidgets {
     level: gtk::LevelBar,
     usage_label: gtk::Label,
     pause_switch: gtk::Switch,
+    /// Guard: true mens polleren opdaterer switchen programmatisk.
+    /// connect_state_set-handleren returnerer tidligt når denne er true.
+    pause_updating: std::rc::Rc<Cell<bool>>,
     backup_list: gtk::ListBox,
     sync_switch: gtk::Switch,
+    /// Guard: true mens polleren opdaterer switchen programmatisk.
+    sync_updating: std::rc::Rc<Cell<bool>>,
     sync_path_row: adw::ActionRow,
     sync_count_row: adw::ActionRow,
     toast_tx: std::sync::mpsc::Sender<String>,
@@ -382,8 +847,10 @@ impl Clone for StatusWidgets {
             level: self.level.clone(),
             usage_label: self.usage_label.clone(),
             pause_switch: self.pause_switch.clone(),
+            pause_updating: self.pause_updating.clone(),
             backup_list: self.backup_list.clone(),
             sync_switch: self.sync_switch.clone(),
+            sync_updating: self.sync_updating.clone(),
             sync_path_row: self.sync_path_row.clone(),
             sync_count_row: self.sync_count_row.clone(),
             toast_tx: self.toast_tx.clone(),
@@ -424,19 +891,27 @@ impl StatusWidgets {
             self.usage_label.set_text("Forbrug ikke tilgængeligt");
         }
 
-        // Pause switch (block signal to avoid feedback loop)
-        if status.state == State::Paused {
-            self.pause_switch.set_active(true);
-        } else if status.state != State::Offline {
-            self.pause_switch.set_active(false);
+        // Pause switch — guard forhindrer feedback-loop:
+        // programmatisk set_active trigger IKKE connect_state_set-handleren.
+        // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
+        let pause_active = status.state == State::Paused;
+        if self.pause_switch.is_active() != pause_active {
+            self.pause_updating.set(true);
+            self.pause_switch.set_active(pause_active);
+            self.pause_updating.set(false);
         }
 
         // Backup list
         rebuild_backup_list(&self.backup_list, &status.backups, &self.toast_tx, &self.window);
 
-        // Sync section
+        // Sync section — samme guard-mønster som pause switch.
+        let sync_active = status.sync.as_ref().map(|s| s.enabled).unwrap_or(false);
         if let Some(sync) = &status.sync {
-            self.sync_switch.set_active(sync.enabled);
+            if self.sync_switch.is_active() != sync_active {
+                self.sync_updating.set(true);
+                self.sync_switch.set_active(sync_active);
+                self.sync_updating.set(false);
+            }
             self.sync_path_row.set_subtitle(
                 sync.root_path.as_deref().unwrap_or("—"),
             );
@@ -447,7 +922,11 @@ impl StatusWidgets {
             };
             self.sync_count_row.set_subtitle(&count_text);
         } else {
-            self.sync_switch.set_active(false);
+            if self.sync_switch.is_active() != sync_active {
+                self.sync_updating.set(true);
+                self.sync_switch.set_active(sync_active);
+                self.sync_updating.set(false);
+            }
             self.sync_path_row.set_subtitle("Ingen sync konfigureret");
             self.sync_count_row.set_subtitle("—");
         }
@@ -460,6 +939,34 @@ fn run_cli(cmd: JottaCommand) {
             let client = CliClient::new(loc);
             if let Err(e) = client.run(&cmd) {
                 eprintln!("jotta-gui: {e}");
+            }
+        }
+    });
+}
+
+/// Start a download on a worker thread. merge er altid false (BUG 4:
+/// --merge er kun gyldigt for mappe-kilder; fil + --merge fejler).
+/// Fejlbeskeder inkluderer fuld argv (Error::CommandFailed viser argv).
+fn start_download(
+    remote_path: String,
+    dest: std::path::PathBuf,
+    toast_tx: std::sync::mpsc::Sender<String>,
+) {
+    std::thread::spawn(move || {
+        if let Some(loc) = BinaryLocator::from_path() {
+            let client = CliClient::new(loc);
+            match client.run(&JottaCommand::Download {
+                remote_path: remote_path.clone(),
+                local_dest: dest,
+                merge: false,
+            }) {
+                Ok(_) => {
+                    let _ = toast_tx.send(format!("Download startet: {remote_path}"));
+                }
+                Err(e) => {
+                    // Error::CommandFailed viser nu fuld argv: "`jotta-cli download ...` exited 1: ..."
+                    let _ = toast_tx.send(format!("Kunne ikke starte download: {e}"));
+                }
             }
         }
     });
@@ -1106,4 +1613,236 @@ fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
     widget.set_margin_end(margin);
 }
 
+// ---------------------------------------------------------------------------
+// Gendan (restore/download) page
+// ---------------------------------------------------------------------------
 
+fn build_restore_page(
+    path_box: &gtk::Box,
+    remote_scrolled: &gtk::ScrolledWindow,
+    download_group: &adw::PreferencesGroup,
+    downloads_group: &adw::PreferencesGroup,
+    downloads_list: &gtk::ListBox,
+    trash_group: &adw::PreferencesGroup,
+) -> gtk::Widget {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_, 24);
+
+    let title = gtk::Label::new(None);
+    title.set_markup("<span size='xx-large' weight='bold'>Gendan</span>");
+    title.set_halign(gtk::Align::Start);
+    box_.append(&title);
+
+    // Remote browser section
+    let browser_title = gtk::Label::new(Some("Fjernfiler"));
+    browser_title.set_halign(gtk::Align::Start);
+    browser_title.add_css_class("heading");
+    box_.append(&browser_title);
+    box_.append(path_box);
+    box_.append(remote_scrolled);
+
+    // Download section
+    box_.append(download_group);
+
+    // Downloads section
+    let downloads_title = gtk::Label::new(Some("Downloads"));
+    downloads_title.set_halign(gtk::Align::Start);
+    downloads_title.add_css_class("heading");
+    downloads_group.add(downloads_list);
+    box_.append(downloads_group);
+
+    // Trash section (web-only — no list UI).
+    let trash_title = gtk::Label::new(Some("Papirkurv"));
+    trash_title.set_halign(gtk::Align::Start);
+    trash_title.add_css_class("heading");
+    box_.append(&trash_title);
+    box_.append(trash_group);
+
+    box_.upcast()
+}
+
+/// Navigation result from a worker thread: plain data only.
+/// Carries the parsed `ls --json` result, the static root entries,
+/// or an error string (e.g. ghost device "Cannot find device").
+enum LsNavResult {
+    Folders(Vec<jotta_core::remote::RemoteEntry>),
+    Revisions(Vec<jotta_core::remote::FileRevision>),
+    Root,
+    Empty,
+    Error(String),
+}
+
+impl From<jotta_core::remote::LsResult> for LsNavResult {
+    fn from(r: jotta_core::remote::LsResult) -> Self {
+        match r {
+            jotta_core::remote::LsResult::Folders(f) => LsNavResult::Folders(f),
+            jotta_core::remote::LsResult::Revisions(r) => LsNavResult::Revisions(r),
+            jotta_core::remote::LsResult::Empty => LsNavResult::Empty,
+        }
+    }
+}
+
+/// Rebuild the remote file list from a navigation result.
+/// Handles Folders, Revisions, Root (static Backup/Archive/Sync), Empty, Error.
+fn rebuild_remote_list_result(
+    list: &gtk::ListBox,
+    result: &LsNavResult,
+    selected: &std::rc::Rc<std::cell::RefCell<String>>,
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    selected.borrow_mut().clear();
+
+    match result {
+        LsNavResult::Root => {
+            let entries = [
+                ("Backup", "Enheder med backup"),
+                ("Archive", "Arkiverede filer"),
+                ("Sync", "Synkroniseret mappe"),
+            ];
+            for (name, desc) in entries {
+                let row = adw::ActionRow::builder()
+                    .title(name)
+                    .subtitle(&format!("Mappe — {desc}"))
+                    .build();
+                let img = gtk::Image::from_icon_name("folder-symbolic");
+                row.add_prefix(&img);
+                row.set_activatable(true);
+                list.append(&row);
+            }
+        }
+        LsNavResult::Folders(entries) => {
+            if entries.is_empty() {
+                let row = adw::ActionRow::builder()
+                    .title("(tom)")
+                    .subtitle("Denne mappe er tom")
+                    .build();
+                list.append(&row);
+                return;
+            }
+            for entry in entries {
+                let subtitle = if entry.is_dir {
+                    "Mappe — dobbeltklik for at åbne".to_string()
+                } else {
+                    // Fil: vis størrelse hvis tilgængelig.
+                    match entry.size {
+                        Some(s) => format!("Fil — {}", Status::format_bytes(s)),
+                        None => "Fil".to_string(),
+                    }
+                };
+                let icon = if entry.is_dir {
+                    "folder-symbolic"
+                } else {
+                    "text-x-generic-symbolic"
+                };
+                let row = adw::ActionRow::builder()
+                    .title(&entry.name)
+                    .subtitle(&subtitle)
+                    .build();
+                let img = gtk::Image::from_icon_name(icon);
+                row.add_prefix(&img);
+                row.set_activatable(true);
+                list.append(&row);
+            }
+        }
+        LsNavResult::Revisions(revs) => {
+            // File revisions — placeholder for future "gendan gammel version".
+            if revs.is_empty() {
+                let row = adw::ActionRow::builder()
+                    .title("Ingen revisioner")
+                    .subtitle("Filen har ingen tidligere versioner")
+                    .build();
+                list.append(&row);
+                return;
+            }
+            for rev in revs {
+                let subtitle = match rev.size {
+                    Some(s) => format!("Revision {} — {}", rev.id, Status::format_bytes(s)),
+                    None => format!("Revision {}", rev.id),
+                };
+                let row = adw::ActionRow::builder()
+                    .title(&format!("Version {}", rev.id))
+                    .subtitle(&subtitle)
+                    .build();
+                let img = gtk::Image::from_icon_name("text-x-generic-symbolic");
+                row.add_prefix(&img);
+                list.append(&row);
+            }
+        }
+        LsNavResult::Empty => {
+            let row = adw::ActionRow::builder()
+                .title("(tom)")
+                .subtitle("Intet at vise")
+                .build();
+            list.append(&row);
+        }
+        LsNavResult::Error(msg) => {
+            // Graceful error — e.g. ghost device "Cannot find device".
+            let row = adw::ActionRow::builder()
+                .title("Kunne ikke indlæse")
+                .subtitle(msg)
+                .build();
+            row.add_css_class("error");
+            let img = gtk::Image::from_icon_name("dialog-warning-symbolic");
+            row.add_prefix(&img);
+            list.append(&row);
+        }
+    }
+}
+
+/// Rebuild the downloads list.
+fn rebuild_downloads_list(
+    list: &gtk::ListBox,
+    entries: &[jotta_core::remote::DownloadEntry],
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    if entries.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen aktive downloads")
+            .subtitle("Downloads vises her mens de kører eller ved fejl")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for entry in entries {
+        let status_text = match entry.status {
+            jotta_core::remote::DownloadStatus::Ongoing => "Kører…",
+            jotta_core::remote::DownloadStatus::Failed => "Fejlet",
+            jotta_core::remote::DownloadStatus::Completed => "Færdig",
+        };
+        let subtitle = format!("{} → {}", entry.remote_path, entry.local_dest);
+        let row = adw::ActionRow::builder()
+            .title(&format!("{} ({})", entry.remote_path, status_text))
+            .subtitle(&subtitle)
+            .build();
+
+        // Abort/clear button.
+        let abort_btn = gtk::Button::from_icon_name("process-stop-symbolic");
+        abort_btn.add_css_class("flat");
+        abort_btn.set_valign(gtk::Align::Center);
+        abort_btn.set_tooltip_text(Some("Annuller eller fjern fra liste"));
+        let id = entry.id.clone();
+        abort_btn.connect_clicked(move |_| {
+            run_cli(JottaCommand::DownloadAbort(id.clone()));
+        });
+        row.add_suffix(&abort_btn);
+
+        // Retry button (only for failed).
+        if entry.status == jotta_core::remote::DownloadStatus::Failed {
+            let retry_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
+            retry_btn.add_css_class("flat");
+            retry_btn.set_valign(gtk::Align::Center);
+            retry_btn.set_tooltip_text(Some("Prøv igen"));
+            let id = entry.id.clone();
+            retry_btn.connect_clicked(move |_| {
+                run_cli(JottaCommand::DownloadRetry(id.clone()));
+            });
+            row.add_suffix(&retry_btn);
+        }
+
+        list.append(&row);
+    }
+}
