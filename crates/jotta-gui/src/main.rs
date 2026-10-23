@@ -370,59 +370,54 @@ fn build_ui(app: &adw::Application) {
     ));
 
     // --- Gendan page: remote browser state + handlers ---
-    // Current remote path being browsed (starts at root: Backup/Archive/Sync).
+    // Current remote path being browsed (main thread only, never crosses threads).
     let restore_current_path = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
-    // Selected entry in the remote list (name only).
+    // Selected entry in the remote list (main thread only).
     let restore_selected = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
 
     // Initial load: list root (Backup, Archive, Sync as top-level entries).
+    // Worker thread owns only plain data; results go back via mpsc channel
+    // + idle_add_local on the main thread (same pattern as the 3s poller).
     {
         let restore_list = restore_list.clone();
         let restore_path_label = restore_path_label.clone();
-        let toast_tx = toast_tx.clone();
-        let current_path = restore_current_path.clone();
+        let selected = restore_selected.clone();
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        glib::idle_add_local(move || {
+            let rx = data_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(entries) => {
+                    restore_path_label.set_text("Backup / Archive / Sync");
+                    rebuild_remote_list(&restore_list, &entries, &selected);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
         std::thread::spawn(move || {
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
-                // Root listing: try `ls` with empty/root path.
                 let text = client
                     .run_text(&JottaCommand::LsRemote(String::new()))
                     .unwrap_or_default();
                 let entries = jotta_core::remote::parse_ls(&text);
-                // If empty, show static top-level entries.
                 let entries = if entries.is_empty() {
                     vec![
-                        jotta_core::remote::RemoteEntry {
-                            name: "Backup".into(),
-                            is_dir: true,
-                            size: None,
-                        },
-                        jotta_core::remote::RemoteEntry {
-                            name: "Archive".into(),
-                            is_dir: true,
-                            size: None,
-                        },
-                        jotta_core::remote::RemoteEntry {
-                            name: "Sync".into(),
-                            is_dir: true,
-                            size: None,
-                        },
+                        jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
+                        jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
+                        jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
                     ]
                 } else {
                     entries
                 };
-                current_path.borrow_mut().clear();
-                let label_text = "Backup / Archive / Sync".to_string();
-                glib::idle_add_local_once(move || {
-                    restore_path_label.set_text(&label_text);
-                    rebuild_remote_list(&restore_list, &entries, &restore_selected);
-                });
-                let _ = toast_tx;
+                let _ = data_tx.send(entries);
             }
         });
     }
 
-    // Row selected in remote list -> update selection.
+    // Row selected in remote list -> update selection (main thread only).
     restore_list.connect_row_selected(clone!(
         #[strong]
         restore_selected,
@@ -439,6 +434,7 @@ fn build_ui(app: &adw::Application) {
     ));
 
     // Double-click / activate row -> navigate into directory.
+    // Worker thread fetches listing; result via mpsc + idle_add_local.
     restore_list.connect_row_activated(clone!(
         #[strong]
         restore_current_path,
@@ -461,19 +457,32 @@ fn build_ui(app: &adw::Application) {
                     *restore_current_path.borrow_mut() = new_path.clone();
                     restore_path_label.set_text(&new_path);
                     *restore_selected.borrow_mut() = String::new();
-                    // Fetch listing on worker thread.
+
+                    let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+                    let data_rx = Arc::new(Mutex::new(data_rx));
                     let list = restore_list.clone();
                     let sel = restore_selected.clone();
+                    glib::idle_add_local(move || {
+                        let rx = data_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(entries) => {
+                                rebuild_remote_list(&list, &entries, &sel);
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+
+                    let path = new_path.clone();
                     std::thread::spawn(move || {
                         if let Some(loc) = BinaryLocator::from_path() {
                             let client = CliClient::new(loc);
                             let text = client
-                                .run_text(&JottaCommand::LsRemote(new_path.clone()))
+                                .run_text(&JottaCommand::LsRemote(path))
                                 .unwrap_or_default();
                             let entries = jotta_core::remote::parse_ls(&text);
-                            glib::idle_add_local_once(move || {
-                                rebuild_remote_list(&list, &entries, &sel);
-                            });
+                            let _ = data_tx.send(entries);
                         }
                     });
                 }
@@ -503,39 +512,41 @@ fn build_ui(app: &adw::Application) {
                 path_label.set_text(&parent);
             }
             *sel.borrow_mut() = String::new();
-            let list = list.clone();
-            let sel = sel.clone();
+
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+            let data_rx = Arc::new(Mutex::new(data_rx));
+            let list_r = list.clone();
+            let sel_r = sel.clone();
+            glib::idle_add_local(move || {
+                let rx = data_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(entries) => {
+                        rebuild_remote_list(&list_r, &entries, &sel_r);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+
+            let path = parent.clone();
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
                     let text = client
-                        .run_text(&JottaCommand::LsRemote(parent.clone()))
+                        .run_text(&JottaCommand::LsRemote(path.clone()))
                         .unwrap_or_default();
                     let entries = jotta_core::remote::parse_ls(&text);
-                    let entries = if entries.is_empty() && parent.is_empty() {
+                    let entries = if entries.is_empty() && path.is_empty() {
                         vec![
-                            jotta_core::remote::RemoteEntry {
-                                name: "Backup".into(),
-                                is_dir: true,
-                                size: None,
-                            },
-                            jotta_core::remote::RemoteEntry {
-                                name: "Archive".into(),
-                                is_dir: true,
-                                size: None,
-                            },
-                            jotta_core::remote::RemoteEntry {
-                                name: "Sync".into(),
-                                is_dir: true,
-                                size: None,
-                            },
+                            jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
+                            jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
+                            jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
                         ]
                     } else {
                         entries
                     };
-                    glib::idle_add_local_once(move || {
-                        rebuild_remote_list(&list, &entries, &sel);
-                    });
+                    let _ = data_tx.send(entries);
                 }
             });
         });
@@ -548,8 +559,24 @@ fn build_ui(app: &adw::Application) {
         let sel = restore_selected.clone();
         restore_refresh_btn.connect_clicked(move |_| {
             let path = current_path.borrow().clone();
-            let list = list.clone();
-            let sel = sel.clone();
+
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+            let data_rx = Arc::new(Mutex::new(data_rx));
+            let list_r = list.clone();
+            let sel_r = sel.clone();
+            glib::idle_add_local(move || {
+                let rx = data_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(entries) => {
+                        rebuild_remote_list(&list_r, &entries, &sel_r);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
+
+            let path = path.clone();
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
@@ -559,28 +586,14 @@ fn build_ui(app: &adw::Application) {
                     let entries = jotta_core::remote::parse_ls(&text);
                     let entries = if entries.is_empty() && path.is_empty() {
                         vec![
-                            jotta_core::remote::RemoteEntry {
-                                name: "Backup".into(),
-                                is_dir: true,
-                                size: None,
-                            },
-                            jotta_core::remote::RemoteEntry {
-                                name: "Archive".into(),
-                                is_dir: true,
-                                size: None,
-                            },
-                            jotta_core::remote::RemoteEntry {
-                                name: "Sync".into(),
-                                is_dir: true,
-                                size: None,
-                            },
+                            jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
+                            jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
+                            jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
                         ]
                     } else {
                         entries
                     };
-                    glib::idle_add_local_once(move || {
-                        rebuild_remote_list(&list, &entries, &sel);
-                    });
+                    let _ = data_tx.send(entries);
                 }
             });
         });
@@ -643,33 +656,55 @@ fn build_ui(app: &adw::Application) {
         });
     }
 
-    // Downloads list: load on startup + refresh button on trash group triggers it too.
+    // Downloads list: load on startup (worker sends plain data, main thread rebuilds).
     {
         let list = restore_downloads_list.clone();
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::DownloadEntry>>();
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        glib::idle_add_local(move || {
+            let rx = data_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(entries) => {
+                    rebuild_downloads_list(&list, &entries);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
         std::thread::spawn(move || {
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
                 if let Ok(text) = client.run_text(&JottaCommand::ListDownloads) {
                     let entries = jotta_core::remote::parse_downloads(&text);
-                    glib::idle_add_local_once(move || {
-                        rebuild_downloads_list(&list, &entries);
-                    });
+                    let _ = data_tx.send(entries);
                 }
             }
         });
     }
 
-    // Trash: load on startup.
+    // Trash: load on startup (same pattern).
     {
         let list = restore_trash_list.clone();
+        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
+        let data_rx = Arc::new(Mutex::new(data_rx));
+        glib::idle_add_local(move || {
+            let rx = data_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(entries) => {
+                    rebuild_trash_list(&list, &entries);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
         std::thread::spawn(move || {
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
                 if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
                     let entries = jotta_core::remote::parse_trash(&text);
-                    glib::idle_add_local_once(move || {
-                        rebuild_trash_list(&list, &entries);
-                    });
+                    let _ = data_tx.send(entries);
                 }
             }
         });
@@ -679,15 +714,26 @@ fn build_ui(app: &adw::Application) {
     {
         let list = restore_trash_list.clone();
         restore_trash_refresh_btn.connect_clicked(move |_| {
-            let list = list.clone();
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
+            let data_rx = Arc::new(Mutex::new(data_rx));
+            let list_r = list.clone();
+            glib::idle_add_local(move || {
+                let rx = data_rx.lock().unwrap();
+                match rx.try_recv() {
+                    Ok(entries) => {
+                        rebuild_trash_list(&list_r, &entries);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                }
+            });
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
                     if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
                         let entries = jotta_core::remote::parse_trash(&text);
-                        glib::idle_add_local_once(move || {
-                            rebuild_trash_list(&list, &entries);
-                        });
+                        let _ = data_tx.send(entries);
                     }
                 }
             });
@@ -1693,12 +1739,12 @@ fn rebuild_trash_list(
         restore_btn.set_valign(gtk::Align::Center);
         restore_btn.set_tooltip_text(Some("Gendan til original placering"));
         let path = entry.path.clone();
-        let list = list.clone();
+        let list_restore = list.clone();
         restore_btn.connect_clicked(move |_| {
             // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
             let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
             let refresh_rx = Arc::new(Mutex::new(refresh_rx));
-            let list_r = list.clone();
+            let list_r = list_restore.clone();
             glib::idle_add_local(move || {
                 let rx = refresh_rx.lock().unwrap();
                 match rx.try_recv() {
@@ -1736,7 +1782,7 @@ fn rebuild_trash_list(
         purge_btn.set_tooltip_text(Some("Slet permanent (kan ikke fortrydes)"));
         let path = entry.path.clone();
         let name = entry.name.clone();
-        let list = list.clone();
+        let list_purge = list.clone();
         purge_btn.connect_clicked(move |_| {
             let confirm = adw::AlertDialog::new(
                 Some("Slet permanent fra papirkurv?"),
@@ -1750,14 +1796,14 @@ fn rebuild_trash_list(
             confirm.set_default_response(Some("cancel"));
             confirm.set_close_response("cancel");
             let path = path.clone();
-            let list = list.clone();
-            let root = list.root();
+            let root = list_purge.root();
+            let list_purge_inner = list_purge.clone();
             confirm.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
                 if resp == "purge" {
                     // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
                     let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
                     let refresh_rx = Arc::new(Mutex::new(refresh_rx));
-                    let list_r = list.clone();
+                    let list_r = list_purge_inner.clone();
                     glib::idle_add_local(move || {
                         let rx = refresh_rx.lock().unwrap();
                         match rx.try_recv() {
