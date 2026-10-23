@@ -22,6 +22,8 @@ pub struct RemoteEntry {
     pub size: Option<u64>,
     /// Remote path (e.g. `/backup/Laptop`), if present.
     pub remote_path: Option<String>,
+    /// Modified timestamp (millis since epoch), if present.
+    pub modified: Option<u64>,
 }
 
 /// One revision of a remote file (from `ls <file> --json`).
@@ -73,29 +75,15 @@ fn as_str_ci<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Parse `jotta-cli ls <path> --json` output.
 ///
-/// Handles two verified schemas (case-tolerant):
-/// - Folder: `{"Folders": [{"Name", "Path", "Modified", "Size"?}]}`
-/// - File:   `{"revisions": [{"id", "size", "checksum", ...}]}`
+/// Verified schemas (case-tolerant, from real jotta-cli on Fedora):
+/// - Folder listing: `{"Folders": [{"Name","Path","Modified","Size"?}], "Files": [{"Name","Path","Checksum","Size","Created","Modified"}]}`
+///   NB: Der er INGEN type/dir-kolonne — fil vs mappe afgøres AF ARRAY-MEDLEMSKAB.
+///   `Size` er OPTIONAL på Folders (nogle enheder omitter den).
+/// - File revisions: `{"revisions": [{"id","size","checksum",...}]}`
 ///
 /// Also tolerates a bare array of folder objects (no wrapper key).
 pub fn parse_ls_json(v: &Value) -> LsResult {
-    // Try "Folders" (case-tolerant).
-    if let Some(arr) = get_ci(v, "Folders").and_then(|x| x.as_array()) {
-        let entries: Vec<RemoteEntry> = arr
-            .iter()
-            .filter_map(|item| {
-                let name = as_str_ci(item, "Name")?.to_string();
-                Some(RemoteEntry {
-                    name,
-                    is_dir: true,
-                    size: as_u64_ci(item, "Size"),
-                    remote_path: as_str_ci(item, "Path").map(str::to_owned),
-                })
-            })
-            .collect();
-        return LsResult::Folders(entries);
-    }
-    // Try "revisions" (case-tolerant).
+    // Try "revisions" first (file listing — distinct schema).
     if let Some(arr) = get_ci(v, "revisions").and_then(|x| x.as_array()) {
         let revisions: Vec<FileRevision> = arr
             .iter()
@@ -110,6 +98,45 @@ pub fn parse_ls_json(v: &Value) -> LsResult {
             .collect();
         return LsResult::Revisions(revisions);
     }
+
+    // Folder listing: læs BÅDE "Folders" og "Files" arrays.
+    // Fil vs mappe afgøres af hvilket array elementet står i.
+    let folders_arr = get_ci(v, "Folders").and_then(|x| x.as_array());
+    let files_arr = get_ci(v, "Files").and_then(|x| x.as_array());
+
+    if folders_arr.is_some() || files_arr.is_some() {
+        let mut entries: Vec<RemoteEntry> = Vec::new();
+        // Folders først (mapper øverst i browseren).
+        if let Some(arr) = folders_arr {
+            for item in arr {
+                if let Some(name) = as_str_ci(item, "Name") {
+                    entries.push(RemoteEntry {
+                        name: name.to_string(),
+                        is_dir: true,
+                        size: as_u64_ci(item, "Size"),
+                        remote_path: as_str_ci(item, "Path").map(str::to_owned),
+                        modified: as_u64_ci(item, "Modified"),
+                    });
+                }
+            }
+        }
+        // Files derefter.
+        if let Some(arr) = files_arr {
+            for item in arr {
+                if let Some(name) = as_str_ci(item, "Name") {
+                    entries.push(RemoteEntry {
+                        name: name.to_string(),
+                        is_dir: false,
+                        size: as_u64_ci(item, "Size"),
+                        remote_path: as_str_ci(item, "Path").map(str::to_owned),
+                        modified: as_u64_ci(item, "Modified"),
+                    });
+                }
+            }
+        }
+        return LsResult::Folders(entries);
+    }
+
     // Try a bare array of folder objects.
     if let Value::Array(arr) = v {
         let entries: Vec<RemoteEntry> = arr
@@ -121,6 +148,7 @@ pub fn parse_ls_json(v: &Value) -> LsResult {
                     is_dir: true,
                     size: as_u64_ci(item, "Size"),
                     remote_path: as_str_ci(item, "Path").map(str::to_owned),
+                    modified: as_u64_ci(item, "Modified"),
                 })
             })
             .collect();
@@ -252,6 +280,19 @@ mod tests {
         ]
     }"#;
 
+    /// VERIFICERET schema fra `ls "Backup/Laptop/Documents" --json` (Fedora-test, iteration 6d).
+    /// NB: INGEN type/dir-kolonne — fil vs mappe afgøres AF ARRAY-MEDLEMSKAB.
+    /// Filnavne rummer mellemrum, æøå, em-streger og "_".
+    const REAL_LS_MIXED: &str = r#"{
+        "Folders": [
+            {"Name": "Undermappe — test", "Path": "/backup/Laptop/Documents/Undermappe — test", "Modified": 1792743158517}
+        ],
+        "Files": [
+            {"Name": "CV Eske Aller — 2024.pdf", "Path": "/backup/Laptop/Documents/CV Eske Aller — 2024.pdf", "Checksum": "abc123", "Size": 245760, "Created": 1791366225783, "Modified": 1792743158517},
+            {"Name": "noter_æøå.txt", "Path": "/backup/Laptop/Documents/noter_æøå.txt", "Checksum": "def456", "Size": 1024, "Created": 1791366225783, "Modified": 1792743158517}
+        ]
+    }"#;
+
     #[test]
     fn parses_ls_folders_real_schema() {
         let v = json::parse(REAL_LS_BACKUP).unwrap();
@@ -266,6 +307,44 @@ mod tests {
                 assert_eq!(entries[1].size, Some(7867524812));
             }
             _ => panic!("expected Folders"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_mixed_folders_and_files() {
+        // VERIFICERET: fil vs mappe afgøres af array-medlemskab (ingen type-kolonne).
+        let v = json::parse(REAL_LS_MIXED).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Folders(entries) => {
+                assert_eq!(entries.len(), 3);
+                // Først: mappen
+                assert_eq!(entries[0].name, "Undermappe — test");
+                assert!(entries[0].is_dir);
+                assert_eq!(entries[0].size, None); // Folders har ikke altid Size
+                // Så: filerne
+                assert_eq!(entries[1].name, "CV Eske Aller — 2024.pdf");
+                assert!(!entries[1].is_dir);
+                assert_eq!(entries[1].size, Some(245760));
+                assert_eq!(entries[1].modified, Some(1792743158517));
+                assert_eq!(entries[2].name, "noter_æøå.txt");
+                assert!(!entries[2].is_dir);
+                assert_eq!(entries[2].size, Some(1024));
+            }
+            _ => panic!("expected Folders (mixed)"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_files_only() {
+        // Kun Files array, ingen Folders — skal stadig virke.
+        let v = json::parse(r#"{"Files": [{"Name": "a.txt", "Size": 100, "Modified": 1234}]}"#).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Folders(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert!(!entries[0].is_dir);
+                assert_eq!(entries[0].name, "a.txt");
+            }
+            _ => panic!("expected Folders (files only)"),
         }
     }
 

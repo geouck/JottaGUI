@@ -14,6 +14,7 @@ use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
 use jotta_core::status::{State, Status};
 use libadwaita as adw;
 use libadwaita::prelude::*;
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -277,31 +278,54 @@ fn build_ui(app: &adw::Application) {
     window.set_content(Some(&toast_overlay));
 
     // --- Wire handlers ---
-    let toast_tx_pause = toast_tx.clone();
-    pause_switch.connect_state_set(move |_sw, state| {
-        let cmd = if state {
-            JottaCommand::Resume
-        } else {
-            JottaCommand::Pause
-        };
-        if let Some(loc) = BinaryLocator::from_path() {
-            let client = CliClient::new(loc);
-            let tx = toast_tx_pause.clone();
+    // Guards: når polleren opdaterer switches programmatisk, sættes guard=true
+    // så connect_state_set-handleren returnerer tidligt uden at udstede kommandoer.
+    // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
+    let pause_updating = std::rc::Rc::new(Cell::new(false));
+    let sync_updating = std::rc::Rc::new(Cell::new(false));
+
+    // Pause switch: bruger-toggle → Pause/Resume kommando.
+    // Ved fejl: revert switch (blocked handler) + ÉN toast. Ingen auto-retry.
+    {
+        let pause_updating = pause_updating.clone();
+        let pause_switch = pause_switch.clone();
+        let toast_tx = toast_tx.clone();
+        pause_switch.connect_state_set(move |_sw, state| {
+            // Guard: programmatisk opdatering fra polleren — gør ingenting.
+            if pause_updating.get() {
+                return Propagation::Proceed;
+            }
+            let cmd = if state {
+                JottaCommand::Resume
+            } else {
+                JottaCommand::Pause
+            };
+            let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
-                if let Err(e) = client.run(&cmd) {
-                    let _ = tx.send(format!("Kunne ikke ændre pause: {e}"));
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    if let Err(e) = client.run(&cmd) {
+                        // Fejl: ÉN toast. Switch reverteres ved næste poll
+                        // (status uændret → poller sætter den tilbage).
+                        let _ = toast_tx.send(format!("Kunne ikke ændre pause: {e}"));
+                    }
                 }
             });
-        }
-        Propagation::Proceed
-    });
+            Propagation::Proceed
+        });
+    }
 
     // Sync switch: ON = sync running (SyncStart), OFF = stopped (SyncStop).
     // Destructive: stopping sync is confirmed (safety rule 3).
     {
         let window = window.clone();
         let sync_switch = sync_switch.clone();
+        let sync_updating = sync_updating.clone();
         sync_switch.connect_state_set(move |sw, state| {
+            // Guard: programmatisk opdatering fra polleren — gør ingenting.
+            if sync_updating.get() {
+                return Propagation::Proceed;
+            }
             if !state {
                 // Turning OFF: confirm before stopping sync.
                 let dialog = adw::AlertDialog::new(
@@ -315,12 +339,15 @@ fn build_ui(app: &adw::Application) {
                 dialog.set_close_response("cancel");
                 let sw2 = sw.clone();
                 let window = window.clone();
+                let sync_updating = sync_updating.clone();
                 dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
                     if resp == "stop" {
                         run_cli(JottaCommand::SyncStop);
                     } else {
-                        // Revert the switch.
+                        // Revert the switch (blocked handler — ingen kommando).
+                        sync_updating.set(true);
                         sw2.set_active(true);
+                        sync_updating.set(false);
                     }
                 });
                 return Propagation::Stop;
@@ -716,8 +743,10 @@ fn build_ui(app: &adw::Application) {
         level: status_level.clone(),
         usage_label: status_usage_label.clone(),
         pause_switch: pause_switch.clone(),
+        pause_updating: pause_updating.clone(),
         backup_list: backup_list.clone(),
         sync_switch: sync_switch.clone(),
+        sync_updating: sync_updating.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
         toast_tx: toast_tx.clone(),
@@ -767,8 +796,13 @@ struct StatusWidgets {
     level: gtk::LevelBar,
     usage_label: gtk::Label,
     pause_switch: gtk::Switch,
+    /// Guard: true mens polleren opdaterer switchen programmatisk.
+    /// connect_state_set-handleren returnerer tidligt når denne er true.
+    pause_updating: std::rc::Rc<Cell<bool>>,
     backup_list: gtk::ListBox,
     sync_switch: gtk::Switch,
+    /// Guard: true mens polleren opdaterer switchen programmatisk.
+    sync_updating: std::rc::Rc<Cell<bool>>,
     sync_path_row: adw::ActionRow,
     sync_count_row: adw::ActionRow,
     toast_tx: std::sync::mpsc::Sender<String>,
@@ -783,8 +817,10 @@ impl Clone for StatusWidgets {
             level: self.level.clone(),
             usage_label: self.usage_label.clone(),
             pause_switch: self.pause_switch.clone(),
+            pause_updating: self.pause_updating.clone(),
             backup_list: self.backup_list.clone(),
             sync_switch: self.sync_switch.clone(),
+            sync_updating: self.sync_updating.clone(),
             sync_path_row: self.sync_path_row.clone(),
             sync_count_row: self.sync_count_row.clone(),
             toast_tx: self.toast_tx.clone(),
@@ -825,19 +861,27 @@ impl StatusWidgets {
             self.usage_label.set_text("Forbrug ikke tilgængeligt");
         }
 
-        // Pause switch (block signal to avoid feedback loop)
-        if status.state == State::Paused {
-            self.pause_switch.set_active(true);
-        } else if status.state != State::Offline {
-            self.pause_switch.set_active(false);
+        // Pause switch — guard forhindrer feedback-loop:
+        // programmatisk set_active trigger IKKE connect_state_set-handleren.
+        // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
+        let pause_active = status.state == State::Paused;
+        if self.pause_switch.is_active() != pause_active {
+            self.pause_updating.set(true);
+            self.pause_switch.set_active(pause_active);
+            self.pause_updating.set(false);
         }
 
         // Backup list
         rebuild_backup_list(&self.backup_list, &status.backups, &self.toast_tx, &self.window);
 
-        // Sync section
+        // Sync section — samme guard-mønster som pause switch.
+        let sync_active = status.sync.as_ref().map(|s| s.enabled).unwrap_or(false);
         if let Some(sync) = &status.sync {
-            self.sync_switch.set_active(sync.enabled);
+            if self.sync_switch.is_active() != sync_active {
+                self.sync_updating.set(true);
+                self.sync_switch.set_active(sync_active);
+                self.sync_updating.set(false);
+            }
             self.sync_path_row.set_subtitle(
                 sync.root_path.as_deref().unwrap_or("—"),
             );
@@ -848,7 +892,11 @@ impl StatusWidgets {
             };
             self.sync_count_row.set_subtitle(&count_text);
         } else {
-            self.sync_switch.set_active(false);
+            if self.sync_switch.is_active() != sync_active {
+                self.sync_updating.set(true);
+                self.sync_switch.set_active(sync_active);
+                self.sync_updating.set(false);
+            }
             self.sync_path_row.set_subtitle("Ingen sync konfigureret");
             self.sync_count_row.set_subtitle("—");
         }
@@ -1619,8 +1667,9 @@ fn rebuild_remote_list_result(
                 let subtitle = if entry.is_dir {
                     "Mappe — dobbeltklik for at åbne".to_string()
                 } else {
+                    // Fil: vis størrelse hvis tilgængelig.
                     match entry.size {
-                        Some(s) => Status::format_bytes(s),
+                        Some(s) => format!("Fil — {}", Status::format_bytes(s)),
                         None => "Fil".to_string(),
                     }
                 };
