@@ -197,34 +197,72 @@ pub fn parse_downloads_json(v: &Value) -> Vec<DownloadEntry> {
     };
     arr.iter()
         .filter_map(|item| {
-            let id = as_str_ci(item, "id")
+            // VERIFICERET real schema (Fedora, 2026): keys are "Id", "Remote", "Local".
+            // Fall back to lowercase variants for forward-compat.
+            let id = as_str_ci(item, "Id")
+                .or_else(|| as_str_ci(item, "id"))
                 .or_else(|| as_str_ci(item, "downloadid"))
                 .or_else(|| as_str_ci(item, "downloadId"))?
                 .to_string();
-            let status = match as_str_ci(item, "status")
-                .or_else(|| as_str_ci(item, "state"))
-                .map(|s| s.to_lowercase())
-                .as_deref()
-            {
-                Some("failed") | Some("error") | Some("errored") => DownloadStatus::Failed,
-                Some("completed") | Some("complete") | Some("done") | Some("finished") => {
-                    DownloadStatus::Completed
+
+            // Status: real schema has "CompletedTimeMs" (set = completed) and
+            // "Errors" object (non-empty = failed). Also check explicit status/state keys.
+            let status = {
+                // Explicit status/state string first.
+                if let Some(s) = as_str_ci(item, "status")
+                    .or_else(|| as_str_ci(item, "state"))
+                    .map(|s| s.to_lowercase())
+                {
+                    match s.as_str() {
+                        "failed" | "error" | "errored" => DownloadStatus::Failed,
+                        "completed" | "complete" | "done" | "finished" => {
+                            DownloadStatus::Completed
+                        }
+                        _ => DownloadStatus::Ongoing,
+                    }
+                } else {
+                    // Real schema heuristics:
+                    // - CompletedTimeMs present → completed
+                    // - Errors is a non-empty object/array → failed
+                    // - Otherwise → ongoing
+                    let completed = get_ci(item, "CompletedTimeMs").is_some()
+                        || get_ci(item, "completedtimems").is_some();
+                    let errors = get_ci(item, "Errors")
+                        .map(|e| match e {
+                            Value::Object(m) => !m.is_empty(),
+                            Value::Array(a) => !a.is_empty(),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
+                    if errors {
+                        DownloadStatus::Failed
+                    } else if completed {
+                        DownloadStatus::Completed
+                    } else {
+                        DownloadStatus::Ongoing
+                    }
                 }
-                _ => DownloadStatus::Ongoing,
             };
-            let remote_path = as_str_ci(item, "remote")
+
+            // Remote path: "Remote" (real schema) or fallbacks.
+            let remote_path = as_str_ci(item, "Remote")
+                .or_else(|| as_str_ci(item, "remote"))
                 .or_else(|| as_str_ci(item, "remotepath"))
                 .or_else(|| as_str_ci(item, "remotePath"))
                 .or_else(|| as_str_ci(item, "source"))
                 .unwrap_or("")
                 .to_string();
-            let local_dest = as_str_ci(item, "dest")
+
+            // Local dest: "Local" (real schema) or fallbacks.
+            let local_dest = as_str_ci(item, "Local")
+                .or_else(|| as_str_ci(item, "dest"))
                 .or_else(|| as_str_ci(item, "destination"))
                 .or_else(|| as_str_ci(item, "local"))
                 .or_else(|| as_str_ci(item, "localdest"))
                 .or_else(|| as_str_ci(item, "localDest"))
                 .unwrap_or("")
                 .to_string();
+
             Some(DownloadEntry {
                 id,
                 remote_path,
@@ -433,6 +471,64 @@ mod tests {
         assert!(parse_downloads_json(&v).is_empty());
         let v = json::parse(r#"{}"#).unwrap();
         assert!(parse_downloads_json(&v).is_empty());
+    }
+
+    /// REAL fixture fra `jotta-cli list downloads --json` (Fedora, 2026).
+    /// NB: Remaining/SelectionCount/Errors kan være TOMME objekter.
+    /// Keys er PascalCase: Id, Remote, Local, Total, Remaining, CompletedTimeMs, etc.
+    const REAL_DOWNLOADS_JSON: &str = r#"[
+        {
+            "Id": "d1",
+            "Remote": "Backup/Laptop/Documents/CV Eske Aller — 2024.pdf",
+            "Local": "/home/eske/Downloads/CV Eske Aller — 2024.pdf",
+            "Total": {"Files": 1, "Bytes": 245760},
+            "Remaining": {"Files": 1, "Bytes": 245760},
+            "StartedTimeMs": 1792743158517,
+            "SelectionCount": {},
+            "Errors": {}
+        },
+        {
+            "Id": "d2",
+            "Remote": "Archive/old_folder",
+            "Local": "/home/eske/Downloads/old_folder",
+            "Total": {"Files": 5, "Bytes": 1024000},
+            "Remaining": {},
+            "StartedTimeMs": 1792743000000,
+            "CompletedTimeMs": 1792743100000,
+            "SelectionCount": {},
+            "Errors": {}
+        },
+        {
+            "Id": "d3",
+            "Remote": "Sync/broken_file.txt",
+            "Local": "/home/eske/Downloads/broken_file.txt",
+            "Total": {"Files": 1, "Bytes": 100},
+            "Remaining": {"Files": 1, "Bytes": 100},
+            "StartedTimeMs": 1792742000000,
+            "SelectionCount": {},
+            "Errors": {"some_error": "file not found"}
+        }
+    ]"#;
+
+    #[test]
+    fn parses_downloads_real_schema() {
+        let v = json::parse(REAL_DOWNLOADS_JSON).unwrap();
+        let entries = parse_downloads_json(&v);
+        assert_eq!(entries.len(), 3);
+
+        // d1: ongoing (Remaining non-empty, no CompletedTimeMs, Errors empty)
+        assert_eq!(entries[0].id, "d1");
+        assert_eq!(entries[0].remote_path, "Backup/Laptop/Documents/CV Eske Aller — 2024.pdf");
+        assert_eq!(entries[0].local_dest, "/home/eske/Downloads/CV Eske Aller — 2024.pdf");
+        assert_eq!(entries[0].status, DownloadStatus::Ongoing);
+
+        // d2: completed (CompletedTimeMs present, Errors empty)
+        assert_eq!(entries[1].id, "d2");
+        assert_eq!(entries[1].status, DownloadStatus::Completed);
+
+        // d3: failed (Errors non-empty)
+        assert_eq!(entries[2].id, "d3");
+        assert_eq!(entries[2].status, DownloadStatus::Failed);
     }
 
     #[test]

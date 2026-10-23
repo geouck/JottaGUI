@@ -294,6 +294,7 @@ impl CliClient {
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             return Err(Error::CommandFailed {
                 program: self.locator.cli.display().to_string(),
+                argv: argv.clone(),
                 code,
                 stderr,
             });

@@ -191,6 +191,8 @@ fn build_ui(app: &adw::Application) {
 
     let restore_list = gtk::ListBox::new();
     restore_list.add_css_class("boxed-list");
+    // BUG 5 fix: enkeltklik = markér, dobbeltklik = åbn (standard-UX).
+    restore_list.set_activate_on_single_click(false);
     let restore_scrolled = gtk::ScrolledWindow::new();
     restore_scrolled.set_child(Some(&restore_list));
     restore_scrolled.set_vexpand(true);
@@ -403,6 +405,8 @@ fn build_ui(app: &adw::Application) {
     let restore_current_path = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
     // Selected entry in the remote list (main thread only).
     let restore_selected = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    // Whether the selected entry is a directory (main thread only).
+    let restore_selected_is_dir = std::rc::Rc::new(std::cell::Cell::new(true));
 
     // Initial load: show static root (Backup / Archive / Sync).
     // No worker thread needed — this is static data applied directly.
@@ -429,11 +433,16 @@ fn build_ui(app: &adw::Application) {
     restore_list.connect_row_selected(clone!(
         #[strong]
         restore_selected,
+        #[strong]
+        restore_selected_is_dir,
         move |_, row| {
             if let Some(row) = row {
                 if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
                     let name = action_row.title().to_string();
+                    let subtitle = action_row.subtitle().unwrap_or_default();
                     *restore_selected.borrow_mut() = name;
+                    // "Mappe —" prefix means directory; "Fil —" means file.
+                    restore_selected_is_dir.set(subtitle.starts_with("Mappe"));
                 }
             } else {
                 restore_selected.borrow_mut().clear();
@@ -642,10 +651,16 @@ fn build_ui(app: &adw::Application) {
     }
 
     // Download selected -> FileDialog for destination -> Download command.
+    // BUG 4 fix: --merge er KUN gyldigt for mappe-kilder. Fil-kilde + --merge
+    // giver "ERROR PathIsFile: not found". GUI sætter merge=false altid (bruger
+    // kan ikke vælge --merge i denne iteration).
+    // NY FAKTA 1: CLI spørger interaktivt ved eksisterende destinationsfil.
+    // GUI-spawn har ingen TTY -> vi tjekker selv og viser egen bekræftelse.
     {
         let window = window.clone();
         let current_path = restore_current_path.clone();
         let sel = restore_selected.clone();
+        let sel_is_dir = restore_selected_is_dir.clone();
         let toast_tx = toast_tx.clone();
         restore_download_btn.connect_clicked(move |_| {
             let selected = sel.borrow().clone();
@@ -658,38 +673,53 @@ fn build_ui(app: &adw::Application) {
             } else {
                 format!("{}/{}", current_path.borrow(), selected)
             };
+            let is_dir = sel_is_dir.get();
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Vælg download-destination");
             dialog.set_modal(true);
             dialog.set_accept_label(Some("Vælg"));
-            let window = window.clone();
+            let window_cb = window.clone();
+            let window_alert = window.clone();
             let toast_tx = toast_tx.clone();
-            dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
+            dialog.select_folder(Some(&window_cb), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(folder) => {
                         if let Some(dest) = folder.path() {
-                            let toast_tx = toast_tx.clone();
-                            std::thread::spawn(move || {
-                                if let Some(loc) = BinaryLocator::from_path() {
-                                    let client = CliClient::new(loc);
-                                    match client.run(&JottaCommand::Download {
-                                        remote_path: remote_path.clone(),
-                                        local_dest: dest,
-                                        merge: false,
-                                    }) {
-                                        Ok(_) => {
-                                            let _ = toast_tx.send(format!(
-                                                "Download startet: {remote_path}"
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            let _ = toast_tx.send(format!(
-                                                "Kunne ikke starte download: {e}"
-                                            ));
-                                        }
+                            // NY FAKTA 1: Tjek om destinationsfilen findes.
+                            // CLI'en ville spørge interaktivt — GUI har ingen TTY.
+                            let dest_file = dest.join(&selected);
+                            if !is_dir && dest_file.exists() {
+                                // Vis egen bekræftelsesdialog før kommandoen.
+                                let alert = adw::AlertDialog::new(
+                                    Some("Erstat eksisterende fil?"),
+                                    Some(&format!(
+                                        "Filen „{selected}“ findes allerede i {}.
+
+Vil du erstatte den?",
+                                        dest.display()
+                                    )),
+                                );
+                                alert.add_response("cancel", "Annuller");
+                                alert.add_response("replace", "Erstat");
+                                alert.set_response_appearance(
+                                    "replace",
+                                    adw::ResponseAppearance::Destructive,
+                                );
+                                alert.set_default_response(Some("cancel"));
+                                alert.set_close_response("cancel");
+                                let window = window_alert.clone();
+                                let remote_path = remote_path.clone();
+                                let dest = dest.clone();
+                                let toast_tx = toast_tx.clone();
+                                alert.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
+                                    if resp == "replace" {
+                                        start_download(remote_path, dest, toast_tx);
                                     }
-                                }
-                            });
+                                    // cancel: gør ingenting
+                                });
+                            } else {
+                                start_download(remote_path, dest, toast_tx);
+                            }
                         }
                     }
                     Err(_) => {} // user cancelled
@@ -909,6 +939,34 @@ fn run_cli(cmd: JottaCommand) {
             let client = CliClient::new(loc);
             if let Err(e) = client.run(&cmd) {
                 eprintln!("jotta-gui: {e}");
+            }
+        }
+    });
+}
+
+/// Start a download on a worker thread. merge er altid false (BUG 4:
+/// --merge er kun gyldigt for mappe-kilder; fil + --merge fejler).
+/// Fejlbeskeder inkluderer fuld argv (Error::CommandFailed viser argv).
+fn start_download(
+    remote_path: String,
+    dest: std::path::PathBuf,
+    toast_tx: std::sync::mpsc::Sender<String>,
+) {
+    std::thread::spawn(move || {
+        if let Some(loc) = BinaryLocator::from_path() {
+            let client = CliClient::new(loc);
+            match client.run(&JottaCommand::Download {
+                remote_path: remote_path.clone(),
+                local_dest: dest,
+                merge: false,
+            }) {
+                Ok(_) => {
+                    let _ = toast_tx.send(format!("Download startet: {remote_path}"));
+                }
+                Err(e) => {
+                    // Error::CommandFailed viser nu fuld argv: "`jotta-cli download ...` exited 1: ..."
+                    let _ = toast_tx.send(format!("Kunne ikke starte download: {e}"));
+                }
             }
         }
     });
