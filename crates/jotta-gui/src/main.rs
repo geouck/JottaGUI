@@ -935,17 +935,16 @@ Vil du erstatte den?",
         .join("jotta-gui.pid");
     let _ = std::fs::write(&gui_pid_file, std::process::id().to_string());
 
-    // Når vinduet lukkes: sæt shutdown-flag (stopper worker threads),
-    // ryd PID-fil, og quit app DIREKTE — ingen idle_add delay.
+    // Når vinduet lukkes: sæt shutdown-flag, ryd PID-fil, og exit processen.
+    // std::process::exit garanterer at terminalen frigøres — app.quit() kan
+    // hænge hvis GApplication main loop ikke frigives korrekt.
     {
         let shutdown = shutdown.clone();
-        let app = app.clone();
         let gui_pid_file = gui_pid_file.clone();
         window.connect_close_request(move |_window| {
             shutdown.store(true, Ordering::SeqCst);
             let _ = std::fs::remove_file(&gui_pid_file);
-            app.quit();
-            glib::Propagation::Proceed
+            std::process::exit(0);
         });
     }
 

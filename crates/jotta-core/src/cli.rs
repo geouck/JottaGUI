@@ -55,7 +55,8 @@ pub enum JottaCommand {
     Status,
     /// `login`: interactive auth (opens a browser on the host).
     Login,
-    /// Pause everything.
+    /// Pause everything. `jotta-cli pause <duration>` — duration is required.
+    /// We use 87600h (10 years) = effectively indefinite until manual resume.
     Pause,
     /// Resume everything.
     Resume,
@@ -149,7 +150,7 @@ impl JottaCommand {
         match self {
             JottaCommand::Status => push(&mut args, &["status", "--json"]),
             JottaCommand::Login => push(&mut args, &["login"]),
-            JottaCommand::Pause => push(&mut args, &["pause"]),
+            JottaCommand::Pause => push(&mut args, &["pause", "87600h"]),
             JottaCommand::Resume => push(&mut args, &["resume"]),
             JottaCommand::ConfigSet { key, value } => {
                 push(&mut args, &["config", "set"]);
@@ -464,6 +465,7 @@ mod tests {
         assert!(JottaCommand::IgnoresList { backup: None }.is_json());
         assert!(JottaCommand::SyncSelectiveList.is_json());
         assert!(!JottaCommand::Pause.is_json());
+        assert_eq!(JottaCommand::Pause.argv(), vec!["pause", "87600h"]);
         assert!(!JottaCommand::IgnoreAdd { pattern: "x".into(), backup: None }.is_json());
         assert!(!JottaCommand::SyncSelectiveAdd("x".into()).is_json());
         // ListDownloadInfo is JSON only when json=true.

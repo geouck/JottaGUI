@@ -149,25 +149,21 @@ impl Tray for JottaTray {
             StandardItem {
                 label: "Afslut".into(),
                 activate: Box::new(move |_tray| {
-                    // Luk GUI hvis den kører (SIGTERM via PID-fil).
-                    let gui_pid_file = std::env::var("XDG_RUNTIME_DIR")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-                        .join("jotta-gui.pid");
-                    if let Ok(pid_str) = std::fs::read_to_string(&gui_pid_file) {
-                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            let _ = std::process::Command::new("kill")
-                                .arg("-TERM")
-                                .arg(pid.to_string())
-                                .spawn();
-                        }
-                    }
                     quit.store(true, Ordering::SeqCst);
                 }),
                 ..Default::default()
             }
             .into(),
         ]
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Dobbeltklik på tray-ikon → åbn GUI.
+        let _ = std::process::Command::new("jotta-desktop")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 }
 
