@@ -116,6 +116,20 @@ impl Tray for JottaTray {
             },
             MenuItem::Separator,
             StandardItem {
+                label: "Åbn vindue".into(),
+                activate: Box::new(|_tray| {
+                    // Start jotta-desktop (GUI). GApplication single-instance
+                    // sikrer at eksisterende vindue aktiveres hvis det kører.
+                    let _ = std::process::Command::new("jotta-desktop")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Åbn jottacloud.com".into(),
                 activate: Box::new(|_tray| {
                     let _ = open_url("https://www.jottacloud.com/web/");

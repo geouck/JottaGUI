@@ -15,6 +15,7 @@ use jotta_core::status::{State, Status};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,16 +59,48 @@ impl App {
 fn main() {
     adw::init().expect("failed to init libadwaita");
 
+    // Single-instance: GApplication med application_id sikrer at kun én
+    // jotta-desktop kører ad gangen. Hvis en instans allerede kører,
+    // aktiveres den eksisterende (vinduet kommer i forgrunden).
     let app = adw::Application::builder()
         .application_id("io.github.eske.JottaDesktop")
+        .flags(gtk::gio::ApplicationFlags::empty())
         .build();
 
-    app.connect_activate(build_ui);
+    // Shutdown-flag: sættes når sidste vindue lukkes.
+    // Worker threads tjekker dette og terminerer.
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Når sidste vindue fjernes: sæt shutdown flag og quit.
+    {
+        let shutdown = shutdown.clone();
+        let app_weak = app.downgrade();
+        app.connect_window_removed(move |app, _window| {
+            if app.windows().is_empty() {
+                shutdown.store(true, Ordering::SeqCst);
+                // Giv workers 100ms til at se flaget, så quit.
+                let app = app_weak.upgrade();
+                if let Some(app) = app {
+                    glib::idle_add_local_once(move || {
+                        app.quit();
+                    });
+                }
+            }
+        });
+    }
+
+    {
+        let shutdown = shutdown.clone();
+        app.connect_activate(move |app| {
+            build_ui(app, shutdown.clone());
+        });
+    }
+
     let code: i32 = app.run().into();
     std::process::exit(code);
 }
 
-fn build_ui(app: &adw::Application) {
+fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let core = Arc::new(App::new());
 
     let window = adw::ApplicationWindow::builder()
@@ -807,18 +840,25 @@ Vil du erstatte den?",
     // Only Status (plain data) crosses the thread boundary via this channel.
     // The main loop applies it to the widgets; widgets never leave this thread.
     let (status_tx, status_rx) = std::sync::mpsc::channel::<Status>();
-    std::thread::spawn(move || loop {
-        let status = match poll_client.status() {
-            Ok(v) => Status::from_json(&v),
-            Err(_) => Status::default(),
-        };
-        {
-            let mut guard = poll_status.lock().unwrap();
-            *guard = status.clone();
-        }
-        let _ = status_tx.send(status);
-        std::thread::sleep(Duration::from_secs(3));
-    });
+    {
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || loop {
+            // Stop poller når app lukker (sidste vindue væk).
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let status = match poll_client.status() {
+                Ok(v) => Status::from_json(&v),
+                Err(_) => Status::default(),
+            };
+            {
+                let mut guard = poll_status.lock().unwrap();
+                *guard = status.clone();
+            }
+            let _ = status_tx.send(status);
+            std::thread::sleep(Duration::from_secs(3));
+        });
+    }
     {
         let status_rx = std::sync::Mutex::new(status_rx);
         let ui = ui.clone();

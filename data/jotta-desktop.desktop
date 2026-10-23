@@ -10,3 +10,5 @@ Categories=Network;FileTransfer;Utility;
 Keywords=jottacloud;cloud;backup;sync;storage;
 StartupNotify=true
 StartupWMClass=jotta-desktop
+DBusActivatable=true
+X-GNOME-UsesNotifications=false
