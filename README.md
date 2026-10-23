@@ -70,27 +70,47 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 6
+## Status: iteration 6 complete (PR #7 merged)
 
-- [x] Workspace + core (25 unit tests green)
-- [x] Tray: status tooltip, pause/resume, open web, quit; 3s polling; ksni 0.3
-- [x] GUI: live status page (state, email, usage bar, pause/resume),
-      backup list + add folder (FileDialog), sync info + start/stop (confirmed)
+- [x] Workspace + core (28 unit tests green, zero dependencies)
+- [x] Tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (always visible),
+      menu (status, pause/resume idempotent, "Åbn vindue", "Åbn jottacloud.com", "Afslut"),
+      single-instance via PID file, spawns GUI on click/"Åbn vindue"
+- [x] GUI: GTK4/libadwaita, GApplication single-instance, 0 deprecation warnings
+- [x] GUI pages: Status (live state, email, usage bar, pause switch with 15s lockout),
+      Backup (list, add folder, per-backup ignores with scope selector),
+      Sync (info, start/stop confirmed, selective folder checkbox dialog),
+      Gendan/Restore (remote browser via `ls --json`, download dialog, downloads list
+      with abort/retry, file revisions parsed),
+      Indstillinger (minimize-to-tray switch, default ON)
+- [x] Minimize-to-tray: closing window hides it; tray "Afslut" also closes GUI when active
+- [x] Clean shutdown: `std::process::exit(0)` on close (no hanging terminal)
+- [x] No zombie processes: reaper threads for all spawned children
 - [x] Status parser verified against real `jotta-cli status --json` output
+      (paused field unreliable — defaults to "running" when absent)
 - [x] Icon theme: 5 state icons + app icon + symbolic, all hicolor sizes
 - [x] Desktop entries + AppStream metainfo
-- [x] GUI: sync selective (checkbox dialog, non-destructive) + backup ignores
-      (per-backup "Udeluk…" dialog, destructive warning on add)
-- [x] Restore/download flow: remote browser (Backup/Archive/Sync via `ls --json`),
-      download dialog (FileDialog -> `download`), downloads list
-      (`list downloads --json`, abort/retry), file revisions (`ls <file> --json`),
-      trash web-only (no list UI — `trash list` has no `--json`)
 - [x] All remote-browsing uses `ls --json` with case-tolerant parsers
-      (real fixtures: Size optional, casing inconsistent Folders/revisions)
-- [ ] Transfers page: `list uploads --json` + `list downloaderrors` + `list uploaderrors`
-      + live feed (iteration 7)
-- [ ] Settings/robustness: migration to adw::Dialog, error toasts, snapshot (iteration 8)
-- [ ] Flathub manifest finalized + jotta-cli bundling (needs Jottacloud's OK)
+      (real fixtures: Size optional, Files array, revisions, ghost devices)
+- [x] `list downloads --json` parsed (tolerant of empty objects)
+- [x] Trash: web-only UI (`trash list` has no `--json`, output unparseable)
+
+### Next: iteration 7 — Transfers page (branch `vibe/iteration7-transfers-errors`)
+
+- [ ] `list uploads --json` + `list downloaderrors` + `list uploaderrors`
+- [ ] Live feed via `observe` (uploads + downloads)
+- [ ] Error dedup (one toast per unique error)
+
+### Later: iteration 8 — Settings/robustness
+
+- [ ] More settings in Indstillinger page
+- [ ] Error toasts, snapshot/restore points
+- [ ] Daemon-not-responding state ("restart jottad via systemctl --user restart jottad")
+
+### Later: iteration 9 — Flatpak
+
+- [ ] Pin jotta-cli version + sha256, get Jottacloud permission to bundle
+- [ ] Flathub submission + AppStream metadata finalization
 
 ## License
 MPL-2.0
