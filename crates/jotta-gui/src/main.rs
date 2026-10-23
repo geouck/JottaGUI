@@ -759,8 +759,13 @@ Vil du erstatte den?",
     // `trash list` has no --json and plain output is unparseable (single
     // space-separated line with filenames containing spaces).
     restore_trash_web_btn.connect_clicked(move |_| {
-        // gtk::show_uri returns () in gtk4-rs 0.9 (not Result).
-        gtk::show_uri(None::<&gtk::Window>, "https://www.jottacloud.com/web/trash", 0);
+        // gtk::UriLauncher (GTK 4.10+) — replacement for deprecated gtk::show_uri.
+        let launcher = gtk::UriLauncher::new("https://www.jottacloud.com/web/trash");
+        launcher.launch(None::<&gtk::Window>, None::<&gtk::gio::Cancellable>, |res| {
+            if let Err(e) = res {
+                eprintln!("jotta-gui: could not open trash URL: {e}");
+            }
+        });
     });
 
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
@@ -1220,15 +1225,12 @@ fn build_sync_selective_dialog(
     currently_ignored: &[String],
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("Vælg mapper at synkronisere"));
-    dialog.set_transient_for(Some(parent));
-    dialog.set_modal(true);
-    dialog.set_default_width(420);
-    dialog.set_default_height(480);
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Vælg mapper at synkronisere");
+    dialog.set_content_width(420);
+    dialog.set_content_height(480);
 
-    let content = dialog.content_area();
-    content.set_spacing(12);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
     let intro = gtk::Label::new(Some(&format!(
@@ -1265,59 +1267,71 @@ fn build_sync_selective_dialog(
     scrolled.set_min_content_height(200);
     content.append(&scrolled);
 
-    dialog.add_button("Annuller", gtk::ResponseType::Cancel);
-    let apply_btn = dialog.add_button("Anvend", gtk::ResponseType::Apply);
-    apply_btn.add_css_class("suggested-action");
-    dialog.set_default_response(gtk::ResponseType::Apply);
+    // ToolbarView with header bar: Cancel (start) + Apply (end).
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
 
+    let dialog_cancel = dialog.clone();
+    let cancel_btn = gtk::Button::with_label("Annuller");
+    cancel_btn.connect_clicked(move |_| {
+        dialog_cancel.close();
+    });
+    header.pack_start(&cancel_btn);
+
+    let dialog_apply = dialog.clone();
     let toast_tx = toast_tx.clone();
     let currently_ignored = currently_ignored.to_vec();
-    dialog.connect_response(move |dlg, response| {
-        if response == gtk::ResponseType::Apply {
-            let mut to_add: Vec<String> = Vec::new();
-            let mut to_remove: Vec<String> = Vec::new();
-            for (folder, cb) in &checkboxes {
-                let was_ignored = currently_ignored.iter().any(|i| i == folder);
-                let is_checked = cb.is_active();
-                if was_ignored && is_checked {
-                    to_remove.push(folder.clone());
-                } else if !was_ignored && !is_checked {
-                    to_add.push(folder.clone());
-                }
+    let apply_btn = gtk::Button::with_label("Anvend");
+    apply_btn.add_css_class("suggested-action");
+    apply_btn.connect_clicked(move |_| {
+        let mut to_add: Vec<String> = Vec::new();
+        let mut to_remove: Vec<String> = Vec::new();
+        for (folder, cb) in &checkboxes {
+            let was_ignored = currently_ignored.iter().any(|i| i == folder);
+            let is_checked = cb.is_active();
+            if was_ignored && is_checked {
+                to_remove.push(folder.clone());
+            } else if !was_ignored && !is_checked {
+                to_add.push(folder.clone());
             }
-            let toast_tx = toast_tx.clone();
-            std::thread::spawn(move || {
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    let mut errors = Vec::new();
-                    for name in &to_add {
-                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
-                            errors.push(format!("{name}: {e}"));
-                        }
-                    }
-                    for name in &to_remove {
-                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
-                            errors.push(format!("{name}: {e}"));
-                        }
-                    }
-                    let msg = if errors.is_empty() {
-                        let n = to_add.len() + to_remove.len();
-                        if n == 0 {
-                            "Ingen ændringer".to_string()
-                        } else {
-                            format!("{n} mappevalg opdateret")
-                        }
-                    } else {
-                        format!("Fejl: {}", errors.join(", "))
-                    };
-                    let _ = toast_tx.send(msg);
-                }
-            });
         }
-        dlg.close();
+        let toast_tx = toast_tx.clone();
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                let mut errors = Vec::new();
+                for name in &to_add {
+                    if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
+                        errors.push(format!("{name}: {e}"));
+                    }
+                }
+                for name in &to_remove {
+                    if let Err(e) = client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
+                        errors.push(format!("{name}: {e}"));
+                    }
+                }
+                let msg = if errors.is_empty() {
+                    let n = to_add.len() + to_remove.len();
+                    if n == 0 {
+                        "Ingen ændringer".to_string()
+                    } else {
+                        format!("{n} mappevalg opdateret")
+                    }
+                } else {
+                    format!("Fejl: {}", errors.join(", "))
+                };
+                let _ = toast_tx.send(msg);
+            }
+        });
+        dialog_apply.close();
     });
+    header.pack_end(&apply_btn);
 
-    dialog.present();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar));
+
+    dialog.present(Some(parent));
 }
 
 /// Open the backup-ignores dialog for ONE specific backup folder.
@@ -1333,15 +1347,12 @@ fn open_backup_ignores_dialog(
     backup_path: &str,
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some(&format!("Udeluk fra backup: {backup_name}")));
-    dialog.set_transient_for(Some(window));
-    dialog.set_modal(true);
-    dialog.set_default_width(480);
-    dialog.set_default_height(520);
+    let dialog = adw::Dialog::new();
+    dialog.set_title(&format!("Udeluk fra backup: {backup_name}"));
+    dialog.set_content_width(480);
+    dialog.set_content_height(520);
 
-    let content = dialog.content_area();
-    content.set_spacing(12);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
     let scope_model = gtk::StringList::new(&["Denne backup", "Alle backups"]);
@@ -1424,7 +1435,7 @@ fn open_backup_ignores_dialog(
     let backup_name2 = backup_name.to_string();
     let scope_row2 = scope_row.clone();
     let patterns_list2 = patterns_list.clone();
-    let dialog_weak = dialog.downgrade();
+    let dialog_parent = dialog.clone();
     pattern_entry.connect_apply(move |entry| {
         let pattern = entry.text().to_string();
         if pattern.trim().is_empty() {
@@ -1457,8 +1468,7 @@ fn open_backup_ignores_dialog(
         let backup_name = backup_name2.clone();
         let pattern_clone = pattern.clone();
         let backup_clone = backup.clone();
-        let Some(dlg) = dialog_weak.upgrade() else { return };
-        confirm.choose(&dlg, None::<&gtk::gio::Cancellable>, move |resp| {
+        confirm.choose(&dialog_parent, None::<&gtk::gio::Cancellable>, move |resp| {
             if resp == "add" {
                 // Refresh channel: worker sends Vec<String>, main thread rebuilds.
                 // The patterns_list widget never crosses the thread boundary.
@@ -1505,13 +1515,20 @@ fn open_backup_ignores_dialog(
         entry.set_text("");
     });
 
-    dialog.add_button("Luk", gtk::ResponseType::Close);
-    dialog.set_default_response(gtk::ResponseType::Close);
-    dialog.connect_response(move |dlg, _| {
-        dlg.close();
+    // ToolbarView with header bar: Luk button.
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    let dialog_close = dialog.clone();
+    let close_btn = gtk::Button::with_label("Luk");
+    close_btn.connect_clicked(move |_| {
+        dialog_close.close();
     });
+    header.pack_end(&close_btn);
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar));
 
-    dialog.present();
+    dialog.present(Some(window));
 }
 
 fn rebuild_backup_ignores_list(
