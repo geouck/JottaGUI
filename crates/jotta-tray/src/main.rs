@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod pixmaps;
+
 #[derive(Debug)]
 struct AppState {
     status: Status,
@@ -63,6 +65,13 @@ impl Tray for JottaTray {
         String::new()
     }
 
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        // Embed ARGB32 pixmap data so the tray icon is always visible,
+        // even when the icon theme path is not found by the host.
+        let state = self.state.lock().unwrap().status.state;
+        pixmaps::icon_for_state(state)
+    }
+
     fn title(&self) -> String {
         "Jotta Desktop".into()
     }
@@ -103,7 +112,7 @@ impl Tray for JottaTray {
             match s.status.paused {
                 Some(true) => StandardItem {
                     label: "Genoptag".into(),
-                    activate: Box::new(|_tray| run_simple(JottaCommand::Resume)),
+                    activate: Box::new(|_tray| run_simple_idempotent(JottaCommand::Resume)),
                     ..Default::default()
                 }
                 .into(),
@@ -140,6 +149,19 @@ impl Tray for JottaTray {
             StandardItem {
                 label: "Afslut".into(),
                 activate: Box::new(move |_tray| {
+                    // Luk GUI hvis den kører (SIGTERM via PID-fil).
+                    let gui_pid_file = std::env::var("XDG_RUNTIME_DIR")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+                        .join("jotta-gui.pid");
+                    if let Ok(pid_str) = std::fs::read_to_string(&gui_pid_file) {
+                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                            let _ = std::process::Command::new("kill")
+                                .arg("-TERM")
+                                .arg(pid.to_string())
+                                .spawn();
+                        }
+                    }
                     quit.store(true, Ordering::SeqCst);
                 }),
                 ..Default::default()
@@ -154,6 +176,21 @@ fn run_simple(cmd: JottaCommand) {
         if let Some(loc) = BinaryLocator::from_path() {
             let client = CliClient::new(loc);
             if let Err(e) = client.run(&cmd) {
+                eprintln!("jotta-tray: {e}");
+            }
+        }
+    });
+}
+
+fn run_simple_idempotent(cmd: JottaCommand) {
+    std::thread::spawn(move || {
+        if let Some(loc) = BinaryLocator::from_path() {
+            let client = CliClient::new(loc);
+            if let Err(e) = client.run(&cmd) {
+                let msg = e.to_string();
+                if msg.contains("already running") {
+                    return;
+                }
                 eprintln!("jotta-tray: {e}");
             }
         }

@@ -364,34 +364,50 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
     let pause_updating = std::rc::Rc::new(Cell::new(false));
     let sync_updating = std::rc::Rc::new(Cell::new(false));
+    // Lockout: true i 5s efter bruger-klik på pause-switch, så polleren
+    // ikke reverterer switchen før daemonen når at opdatere status.
+    let pause_lockout = Arc::new(AtomicBool::new(false));
 
-    // Pause switch: bruger-toggle → config set syncpaused true/false.
-    // docs.jottacloud.com: pause/resume kommandoer pauser jottad (backup);
-    // sync pauses via config syncpaused. Vi bruger config for at undgå
-    // "ERROR already running" når sync allerede kører.
-    // Ved fejl: revert switch (blocked handler) + ÉN toast. Ingen auto-retry.
+    // Pause switch: bruger-toggle → pause/resume (global jottad pause).
+    // pause/resume pauser HELE jottad (backup + sync) — matcher UI-label.
+    // Idempotent: "already running" ved resume = allerede aktiv = success.
+    // Lockout: efter bruger-klik sættes pause_lockout=true i 5s så polleren
+    // ikke reverterer switchen før daemonen når at opdatere status.
     {
         let pause_updating = pause_updating.clone();
         let pause_switch = pause_switch.clone();
         let toast_tx = toast_tx.clone();
+        let pause_lockout = pause_lockout.clone();
         pause_switch.connect_state_set(move |_sw, state| {
             // Guard: programmatisk opdatering fra polleren — gør ingenting.
             if pause_updating.get() {
                 return Propagation::Proceed;
             }
-            // state=true → sync kører (ikke pauset) → syncpaused=false
-            // state=false → sync pauset → syncpaused=true
-            let cmd = JottaCommand::ConfigSet {
-                key: "syncpaused".into(),
-                value: if state { "false".into() } else { "true".into() },
+            // state=true → resume (unpause), state=false → pause
+            let cmd = if state {
+                JottaCommand::Resume
+            } else {
+                JottaCommand::Pause
             };
+            // Sæt lockout så polleren ikke reverterer før status opdateres.
+            pause_lockout.store(true, Ordering::SeqCst);
+            {
+                let lockout = pause_lockout.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(5));
+                    lockout.store(false, Ordering::SeqCst);
+                });
+            }
             let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
                     if let Err(e) = client.run(&cmd) {
-                        // Fejl: ÉN toast. Switch reverteres ved næste poll
-                        // (status uændret → poller sætter den tilbage).
+                        let msg = e.to_string();
+                        // "already running" ved resume = idempotent success.
+                        if msg.contains("already running") {
+                            return;
+                        }
                         let _ = toast_tx.send(format!("Kunne ikke ændre pause: {e}"));
                     }
                 }
@@ -862,6 +878,7 @@ Vil du erstatte den?",
         usage_label: status_usage_label.clone(),
         pause_switch: pause_switch.clone(),
         pause_updating: pause_updating.clone(),
+        pause_lockout: pause_lockout.clone(),
         backup_list: backup_list.clone(),
         sync_switch: sync_switch.clone(),
         sync_updating: sync_updating.clone(),
@@ -911,17 +928,23 @@ Vil du erstatte den?",
     }
     ui.apply(&initial);
 
-    // Når vinduet lukkes: sæt shutdown-flag (stopper worker threads) og quit app.
-    // Dette sikrer at processen terminerer når vinduet lukkes — ingen hængende terminal.
+    // Skriv GUI PID-fil så tray kan lukke GUI ved "Afslut".
+    let gui_pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("jotta-gui.pid");
+    let _ = std::fs::write(&gui_pid_file, std::process::id().to_string());
+
+    // Når vinduet lukkes: sæt shutdown-flag (stopper worker threads),
+    // ryd PID-fil, og quit app DIREKTE — ingen idle_add delay.
     {
         let shutdown = shutdown.clone();
         let app = app.clone();
+        let gui_pid_file = gui_pid_file.clone();
         window.connect_close_request(move |_window| {
             shutdown.store(true, Ordering::SeqCst);
-            let app = app.clone();
-            glib::idle_add_local_once(move || {
-                app.quit();
-            });
+            let _ = std::fs::remove_file(&gui_pid_file);
+            app.quit();
             glib::Propagation::Proceed
         });
     }
@@ -939,6 +962,8 @@ struct StatusWidgets {
     /// Guard: true mens polleren opdaterer switchen programmatisk.
     /// connect_state_set-handleren returnerer tidligt når denne er true.
     pause_updating: std::rc::Rc<Cell<bool>>,
+    /// Lockout: true i 5s efter bruger-klik; polleren må ikke opdatere pause-switch.
+    pause_lockout: Arc<AtomicBool>,
     backup_list: gtk::ListBox,
     sync_switch: gtk::Switch,
     /// Guard: true mens polleren opdaterer switchen programmatisk.
@@ -958,6 +983,7 @@ impl Clone for StatusWidgets {
             usage_label: self.usage_label.clone(),
             pause_switch: self.pause_switch.clone(),
             pause_updating: self.pause_updating.clone(),
+            pause_lockout: self.pause_lockout.clone(),
             backup_list: self.backup_list.clone(),
             sync_switch: self.sync_switch.clone(),
             sync_updating: self.sync_updating.clone(),
@@ -1004,8 +1030,10 @@ impl StatusWidgets {
         // Pause switch — guard forhindrer feedback-loop:
         // programmatisk set_active trigger IKKE connect_state_set-handleren.
         // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
+        // Lockout: efter bruger-klik venter vi 5s før poller må opdatere switchen,
+        // så daemonen når at ændre status først.
         let pause_active = status.state == State::Paused;
-        if self.pause_switch.is_active() != pause_active {
+        if self.pause_switch.is_active() != pause_active && !self.pause_lockout.load(Ordering::SeqCst) {
             self.pause_updating.set(true);
             self.pause_switch.set_active(pause_active);
             self.pause_updating.set(false);
