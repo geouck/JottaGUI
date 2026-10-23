@@ -63,9 +63,11 @@ fn main() {
     // CSS: kompakte window controls (minimer/maximer/luk) — mindre knapper
     // så headerbaren ikke fylder for meget på KDE/COSMIC hvor knapperne
     // ellers bliver for store sammenlignet med GNOME/Nextcloud.
+    // GTK4 CSS-nodes: windowcontrols > button.minimize/.maximize/.close
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
-        "headerbar button.windowbutton { min-width: 28px; min-height: 28px; padding: 0 4px; }",
+        "windowcontrols button { min-width: 28px; min-height: 28px; padding: 0 4px; }\n\
+         headerbar { min-height: 40px; }",
     );
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("no display"),
