@@ -79,9 +79,12 @@ impl Tray for JottaTray {
     }
 
     fn status(&self) -> SniStatus {
+        // NOTE: State::Offline does NOT set Passive — the tray must stay
+        // Active (visible) even when jottad is down, so the user can see
+        // the offline icon and open the GUI to read the banner / retry.
+        // Only NeedsLogin gets NeedsAttention.
         match self.state.lock().unwrap().status.state {
             State::NeedsLogin => SniStatus::NeedsAttention,
-            State::Offline => SniStatus::Passive,
             _ => SniStatus::Active,
         }
     }
@@ -341,10 +344,17 @@ fn main() {
     .expect("could not start tray service");
 
     // Poll status every 3s and refresh the tray.
+    // The tray stays alive regardless of jottad state — State::Offline
+    // just shows the offline icon. The user can restart jottad from the
+    // Status page banner or manually; the poller picks up the new state.
     let poll_state = Arc::clone(&state);
     let poll_handle = handle.clone();
     let poll_client = CliClient::new(locator.clone());
+    let poll_quit = Arc::clone(&quit);
     std::thread::spawn(move || loop {
+        if poll_quit.load(Ordering::SeqCst) {
+            break;
+        }
         match poll_client.run(&JottaCommand::Status) {
             Ok(out) => match jotta_core::json::parse(out.stdout.trim()).map(|v| Status::from_json(&v)) {
                 Ok(status) => {

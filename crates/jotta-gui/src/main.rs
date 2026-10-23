@@ -387,19 +387,20 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     stack.add_titled(&restore_page, Some("restore"), "Gendan");
 
     // --- Info page: device, versions, subscription, account ---
-    // Data from status --json (device, email, subscription, usage) +
-    // `jotta-cli version` on a worker thread.
+    // Data from status --json (device, email, subscription) +
+    // `jotta-cli version` on a worker thread (covers both jottad + jotta-cli
+    // since they share the same version number in practice).
     let info_device_row = adw::ActionRow::builder().title("Enhed").build();
     let info_email_row = adw::ActionRow::builder().title("E-mail").build();
     let info_sub_row = adw::ActionRow::builder().title("Abonnement").build();
-    let info_cli_ver_row = adw::ActionRow::builder().title("jotta-cli version").build();
-    let info_daemon_ver_row = adw::ActionRow::builder().title("jottad version").build();
+    let info_jotta_ver_row = adw::ActionRow::builder().title("Jottacloud version").build();
+    let info_app_ver_row = adw::ActionRow::builder().title("Jotta Desktop version").build();
     let info_group = adw::PreferencesGroup::builder().title("System").build();
     info_group.add(&info_device_row);
     info_group.add(&info_email_row);
     info_group.add(&info_sub_row);
-    info_group.add(&info_cli_ver_row);
-    info_group.add(&info_daemon_ver_row);
+    info_group.add(&info_jotta_ver_row);
+    info_group.add(&info_app_ver_row);
     let info_page = build_info_page(&info_group);
     stack.add_titled(&info_page, Some("info"), "Info");
 
@@ -1107,20 +1108,21 @@ Vil du erstatte den?",
         daemon_banner: daemon_banner.clone(),
     };
 
-    // --- Info page: fetch versions once on a worker thread ---
-    // `jotta-cli version` gives CLI version; daemon version is not directly
-    // available via CLI — we show "—" for now.
+    // --- Info page: fetch Jottacloud version once on a worker thread ---
+    // `jotta-cli version` output contains both jottad and jotta-cli version
+    // (they share the same version number). We parse the version line.
+    // App version is a compile-time constant (env! CARGO_PKG_VERSION).
     {
-        let info_cli_ver_row = info_cli_ver_row.clone();
-        let info_daemon_ver_row = info_daemon_ver_row.clone();
-        let (ver_tx, ver_rx) = std::sync::mpsc::channel::<(Option<String>, Option<String>)>();
+        let info_jotta_ver_row = info_jotta_ver_row.clone();
+        let info_app_ver_row = info_app_ver_row.clone();
+        let (ver_tx, ver_rx) = std::sync::mpsc::channel::<Option<String>>();
         let ver_rx = Arc::new(Mutex::new(ver_rx));
         glib::idle_add_local(move || {
             let rx = ver_rx.lock().unwrap();
             match rx.try_recv() {
-                Ok((cli_ver, daemon_ver)) => {
-                    set_row_value(&info_cli_ver_row, cli_ver.as_deref().unwrap_or("—"));
-                    set_row_value(&info_daemon_ver_row, daemon_ver.as_deref().unwrap_or("—"));
+                Ok(jotta_ver) => {
+                    set_row_value(&info_jotta_ver_row, jotta_ver.as_deref().unwrap_or("—"));
+                    set_row_value(&info_app_ver_row, env!("CARGO_PKG_VERSION"));
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -1130,9 +1132,27 @@ Vil du erstatte den?",
         std::thread::spawn(move || {
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
-                let cli_ver = client.run_text(&JottaCommand::Version).ok()
-                    .map(|s| s.trim().to_string());
-                let _ = ver_tx.send((cli_ver, None));
+                // `jotta-cli version` output:
+                //   jottad version :0.17.176206
+                //   jotta-cli version : 0.17.176206
+                // Parse the version number from the jotta-cli line.
+                let ver = client.run_text(&JottaCommand::Version).ok()
+                    .and_then(|s| {
+                        for line in s.lines() {
+                            let lower = line.to_lowercase();
+                            if lower.contains("jotta-cli version") {
+                                // Extract version after the colon.
+                                if let Some(idx) = line.find(':') {
+                                    let v = line[idx + 1..].trim();
+                                    if !v.is_empty() {
+                                        return Some(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    });
+                let _ = ver_tx.send(ver);
             }
         });
     }
