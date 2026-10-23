@@ -173,6 +173,23 @@ fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 fn main() {
+    // Single-instance: skriv PID-fil og afslut hvis en anden tray allerede kører.
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("jotta-tray.pid");
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                eprintln!("jotta-tray: already running (pid {pid}), exiting");
+                std::process::exit(0);
+            }
+        }
+    }
+
+    std::fs::write(&pid_file, std::process::id().to_string()).ok();
+
     let data_dir = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -247,6 +264,7 @@ fn main() {
         std::thread::sleep(Duration::from_millis(200));
     }
     handle.shutdown().wait();
+    let _ = std::fs::remove_file(&pid_file);
     if let Err(e) = supervisor.stop_if_owned() {
         eprintln!("jotta-tray: {e}");
     }

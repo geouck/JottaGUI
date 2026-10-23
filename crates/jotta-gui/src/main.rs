@@ -67,37 +67,65 @@ fn main() {
         .flags(gtk::gio::ApplicationFlags::empty())
         .build();
 
-    // Shutdown-flag: sættes når sidste vindue lukkes.
+    // Shutdown-flag: sættes når vinduet lukkes.
     // Worker threads tjekker dette og terminerer.
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Når sidste vindue fjernes: sæt shutdown flag og quit.
-    {
-        let shutdown = shutdown.clone();
-        let app_weak = app.downgrade();
-        app.connect_window_removed(move |app, _window| {
-            if app.windows().is_empty() {
-                shutdown.store(true, Ordering::SeqCst);
-                // Giv workers 100ms til at se flaget, så quit.
-                let app = app_weak.upgrade();
-                if let Some(app) = app {
-                    glib::idle_add_local_once(move || {
-                        app.quit();
-                    });
-                }
-            }
-        });
-    }
+    // Sikr at tray kører (spawn detached hvis ikke allerede aktiv).
+    ensure_tray_running();
 
     {
         let shutdown = shutdown.clone();
         app.connect_activate(move |app| {
+            // Single-instance: hvis der allerede er et aktivt vindue,
+            // bring det i forgrunden i stedet for at bygge et nyt.
+            if let Some(window) = app.active_window() {
+                window.present();
+                return;
+            }
             build_ui(app, shutdown.clone());
         });
     }
 
     let code: i32 = app.run().into();
     std::process::exit(code);
+}
+
+/// Spawn jotta-tray som detached child hvis den ikke allerede kører.
+/// Tjekker PID-fil i $XDG_RUNTIME_DIR; tray skriver sin egen PID ved opstart.
+fn ensure_tray_running() {
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("jotta-tray.pid");
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+        }
+    }
+
+    let tray_bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("jotta-tray")))
+        .filter(|p| p.exists());
+
+    if let Some(bin) = tray_bin {
+        let _ = std::process::Command::new(bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        return;
+    }
+
+    let _ = std::process::Command::new("jotta-tray")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
@@ -337,7 +365,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let pause_updating = std::rc::Rc::new(Cell::new(false));
     let sync_updating = std::rc::Rc::new(Cell::new(false));
 
-    // Pause switch: bruger-toggle → Pause/Resume kommando.
+    // Pause switch: bruger-toggle → config set syncpaused true/false.
+    // docs.jottacloud.com: pause/resume kommandoer pauser jottad (backup);
+    // sync pauses via config syncpaused. Vi bruger config for at undgå
+    // "ERROR already running" når sync allerede kører.
     // Ved fejl: revert switch (blocked handler) + ÉN toast. Ingen auto-retry.
     {
         let pause_updating = pause_updating.clone();
@@ -348,10 +379,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             if pause_updating.get() {
                 return Propagation::Proceed;
             }
-            let cmd = if state {
-                JottaCommand::Resume
-            } else {
-                JottaCommand::Pause
+            // state=true → sync kører (ikke pauset) → syncpaused=false
+            // state=false → sync pauset → syncpaused=true
+            let cmd = JottaCommand::ConfigSet {
+                key: "syncpaused".into(),
+                value: if state { "false".into() } else { "true".into() },
             };
             let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
@@ -878,6 +910,21 @@ Vil du erstatte den?",
         *guard = initial.clone();
     }
     ui.apply(&initial);
+
+    // Når vinduet lukkes: sæt shutdown-flag (stopper worker threads) og quit app.
+    // Dette sikrer at processen terminerer når vinduet lukkes — ingen hængende terminal.
+    {
+        let shutdown = shutdown.clone();
+        let app = app.clone();
+        window.connect_close_request(move |_window| {
+            shutdown.store(true, Ordering::SeqCst);
+            let app = app.clone();
+            glib::idle_add_local_once(move || {
+                app.quit();
+            });
+            glib::Propagation::Proceed
+        });
+    }
 
     window.present();
 }
