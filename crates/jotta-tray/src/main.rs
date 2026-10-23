@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod pixmaps;
+
 #[derive(Debug)]
 struct AppState {
     status: Status,
@@ -26,6 +28,8 @@ struct AppState {
 struct JottaTray {
     state: Arc<Mutex<AppState>>,
     quit: Arc<AtomicBool>,
+    /// Minimize-to-tray: når aktiv, lukker "Afslut" også GUI.
+    close_gui_on_quit: Arc<AtomicBool>,
 }
 
 impl JottaTray {
@@ -63,6 +67,13 @@ impl Tray for JottaTray {
         String::new()
     }
 
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        // Embed ARGB32 pixmap data so the tray icon is always visible,
+        // even when the icon theme path is not found by the host.
+        let state = self.state.lock().unwrap().status.state;
+        pixmaps::icon_for_state(state)
+    }
+
     fn title(&self) -> String {
         "Jotta Desktop".into()
     }
@@ -92,6 +103,7 @@ impl Tray for JottaTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let s = self.state.lock().unwrap();
         let quit = Arc::clone(&self.quit);
+        let close_gui_on_quit = Arc::clone(&self.close_gui_on_quit);
         vec![
             StandardItem {
                 label: format!("Status: {}", s.status.tooltip()),
@@ -103,7 +115,7 @@ impl Tray for JottaTray {
             match s.status.paused {
                 Some(true) => StandardItem {
                     label: "Genoptag".into(),
-                    activate: Box::new(|_tray| run_simple(JottaCommand::Resume)),
+                    activate: Box::new(|_tray| run_simple_idempotent(JottaCommand::Resume)),
                     ..Default::default()
                 }
                 .into(),
@@ -116,6 +128,14 @@ impl Tray for JottaTray {
             },
             MenuItem::Separator,
             StandardItem {
+                label: "Åbn vindue".into(),
+                activate: Box::new(|_tray| {
+                    spawn_gui();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Åbn jottacloud.com".into(),
                 activate: Box::new(|_tray| {
                     let _ = open_url("https://www.jottacloud.com/web/");
@@ -126,6 +146,21 @@ impl Tray for JottaTray {
             StandardItem {
                 label: "Afslut".into(),
                 activate: Box::new(move |_tray| {
+                    // Hvis minimize-to-tray er aktiv, luk også GUI.
+                    if close_gui_on_quit.load(Ordering::SeqCst) {
+                        let gui_pid_file = std::env::var("XDG_RUNTIME_DIR")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+                            .join("jotta-gui.pid");
+                        if let Ok(pid_str) = std::fs::read_to_string(&gui_pid_file) {
+                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                let _ = std::process::Command::new("kill")
+                                    .arg("-TERM")
+                                    .arg(pid.to_string())
+                                    .spawn();
+                            }
+                        }
+                    }
                     quit.store(true, Ordering::SeqCst);
                 }),
                 ..Default::default()
@@ -133,6 +168,55 @@ impl Tray for JottaTray {
             .into(),
         ]
     }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // Klik på tray-ikon → åbn GUI.
+        spawn_gui();
+    }
+}
+
+/// Find jotta-desktop binary: samme mappe som denne tray-binary, ellers PATH.
+fn find_gui_binary() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("jotta-desktop");
+            if sibling.exists() {
+                return Some(sibling);
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("jotta-desktop");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Spawn jotta-desktop GUI (single-instance via GApplication).
+/// Spawner i en separat tråd der venter på child — ellers bliver den
+/// en zombie når GUI-processen terminerer (tray lever længere end GUI).
+fn spawn_gui() {
+    std::thread::spawn(|| {
+        if let Some(bin) = find_gui_binary() {
+            match std::process::Command::new(&bin)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    // Vent på at GUI-processen terminerer — reaper, undgår zombie.
+                    let _ = child.wait();
+                }
+                Err(e) => eprintln!("jotta-tray: kunne ikke starte jotta-desktop: {e}"),
+            }
+        } else {
+            eprintln!("jotta-tray: jotta-desktop binary ikke fundet");
+        }
+    });
 }
 
 fn run_simple(cmd: JottaCommand) {
@@ -140,6 +224,21 @@ fn run_simple(cmd: JottaCommand) {
         if let Some(loc) = BinaryLocator::from_path() {
             let client = CliClient::new(loc);
             if let Err(e) = client.run(&cmd) {
+                eprintln!("jotta-tray: {e}");
+            }
+        }
+    });
+}
+
+fn run_simple_idempotent(cmd: JottaCommand) {
+    std::thread::spawn(move || {
+        if let Some(loc) = BinaryLocator::from_path() {
+            let client = CliClient::new(loc);
+            if let Err(e) = client.run(&cmd) {
+                let msg = e.to_string();
+                if msg.contains("already running") {
+                    return;
+                }
                 eprintln!("jotta-tray: {e}");
             }
         }
@@ -159,6 +258,23 @@ fn open_url(url: &str) -> std::io::Result<()> {
 }
 
 fn main() {
+    // Single-instance: skriv PID-fil og afslut hvis en anden tray allerede kører.
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("jotta-tray.pid");
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                eprintln!("jotta-tray: already running (pid {pid}), exiting");
+                std::process::exit(0);
+            }
+        }
+    }
+
+    std::fs::write(&pid_file, std::process::id().to_string()).ok();
+
     let data_dir = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -194,9 +310,32 @@ fn main() {
     let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None }));
     let quit = Arc::new(AtomicBool::new(false));
 
+    // Minimize-to-tray: læs fra samme konfigurationsfil som GUI'en.
+    // Standard AKTIV — luk GUI når tray afsluttes.
+    let config_path = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf");
+    let close_gui_on_quit_val = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("minimize_to_tray="))
+                .map(|l| l.trim_end() == "minimize_to_tray=true")
+        })
+        .unwrap_or(true); // Standard: AKTIV
+    let close_gui_on_quit = Arc::new(AtomicBool::new(close_gui_on_quit_val));
+
     let handle: Handle<JottaTray> = JottaTray {
         state: Arc::clone(&state),
         quit: Arc::clone(&quit),
+        close_gui_on_quit: Arc::clone(&close_gui_on_quit),
     }
     .spawn()
     .expect("could not start tray service");
@@ -233,6 +372,7 @@ fn main() {
         std::thread::sleep(Duration::from_millis(200));
     }
     handle.shutdown().wait();
+    let _ = std::fs::remove_file(&pid_file);
     if let Err(e) = supervisor.stop_if_owned() {
         eprintln!("jotta-tray: {e}");
     }

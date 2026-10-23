@@ -15,6 +15,7 @@ use jotta_core::status::{State, Status};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,16 +59,77 @@ impl App {
 fn main() {
     adw::init().expect("failed to init libadwaita");
 
+    // Single-instance: GApplication med application_id sikrer at kun én
+    // jotta-desktop kører ad gangen. Hvis en instans allerede kører,
+    // aktiveres den eksisterende (vinduet kommer i forgrunden).
     let app = adw::Application::builder()
         .application_id("io.github.eske.JottaDesktop")
+        .flags(gtk::gio::ApplicationFlags::empty())
         .build();
 
-    app.connect_activate(build_ui);
+    // Shutdown-flag: sættes når vinduet lukkes.
+    // Worker threads tjekker dette og terminerer.
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Sikr at tray kører (spawn detached hvis ikke allerede aktiv).
+    ensure_tray_running();
+
+    {
+        let shutdown = shutdown.clone();
+        app.connect_activate(move |app| {
+            // Single-instance: hvis der allerede er et aktivt vindue,
+            // bring det i forgrunden i stedet for at bygge et nyt.
+            if let Some(window) = app.active_window() {
+                window.present();
+                return;
+            }
+            build_ui(app, shutdown.clone());
+        });
+    }
+
     let code: i32 = app.run().into();
     std::process::exit(code);
 }
 
-fn build_ui(app: &adw::Application) {
+/// Spawn jotta-tray som detached child hvis den ikke allerede kører.
+/// Tjekker PID-fil i $XDG_RUNTIME_DIR; tray skriver sin egen PID ved opstart.
+/// Spawner i separat tråd der venter på child — undgår zombie-processer.
+fn ensure_tray_running() {
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("jotta-tray.pid");
+
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+        }
+    }
+
+    let tray_bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("jotta-tray")))
+        .filter(|p| p.exists());
+
+    let bin = tray_bin.unwrap_or_else(|| std::path::PathBuf::from("jotta-tray"));
+    std::thread::spawn(move || {
+        match std::process::Command::new(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                let _ = child.wait();
+            }
+            Err(e) => eprintln!("jotta-gui: kunne ikke starte jotta-tray: {e}"),
+        }
+    });
+}
+
+fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let core = Arc::new(App::new());
 
     let window = adw::ApplicationWindow::builder()
@@ -117,6 +179,9 @@ fn build_ui(app: &adw::Application) {
     status_usage_label.add_css_class("dim-label");
     let pause_switch = gtk::Switch::new();
     pause_switch.set_valign(gtk::Align::Center);
+    // Initial state: ON = kører (ikke pauset). jottad kører som standard,
+    // og status.paused er ofte None i JSON — så vi antager "kører".
+    pause_switch.set_active(true);
 
     let status_page = build_status_page(
         &status_state_label,
@@ -235,7 +300,8 @@ fn build_ui(app: &adw::Application) {
     );
     stack.add_titled(&restore_page, Some("restore"), "Gendan");
 
-    stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
+    let settings_page = build_settings_page();
+    stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
         #[strong]
@@ -270,10 +336,28 @@ fn build_ui(app: &adw::Application) {
     sidebar_box.append(&sidebar);
 
     let sidebar_page = adw::NavigationPage::new(&sidebar_box, "Jotta Desktop");
-    let content_page = adw::NavigationPage::new(&stack, "Status");
 
     let split_view = adw::NavigationSplitView::new();
     split_view.set_sidebar(Some(&sidebar_page));
+
+    // FEATURE: Sider skal kunne scrolles når indholdet overflower.
+    // gtk::Stack er IKKE scrollable — vi wrapper hver side individuelt
+    // i en ScrolledWindow ved oprettelsen (se build_*_page funktioner).
+    // Her wrapper vi hele stack i en ydre ScrolledWindow IKKE —
+    // i stedet sikrer vi at hver side har sin egen scroll.
+
+    // FEATURE: Hovedvindue med HeaderBar (minimer/maximer/luk knapper).
+    // ToolbarView + HeaderBar giver standard window controls.
+    let main_toolbar = adw::ToolbarView::new();
+    let main_header = adw::HeaderBar::new();
+    // Vis standard window title buttons (minimer, maksimer, luk).
+    main_header.set_show_start_title_buttons(true);
+    main_header.set_show_end_title_buttons(true);
+    main_toolbar.add_top_bar(&main_header);
+    main_toolbar.set_content(Some(&stack));
+
+    // NavigationPage wrapper så split_view stadig virker.
+    let content_page = adw::NavigationPage::new(&main_toolbar, "Status");
     split_view.set_content(Some(&content_page));
 
     toast_overlay.set_child(Some(&split_view));
@@ -285,30 +369,51 @@ fn build_ui(app: &adw::Application) {
     // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
     let pause_updating = std::rc::Rc::new(Cell::new(false));
     let sync_updating = std::rc::Rc::new(Cell::new(false));
+    // Lockout: true i 5s efter bruger-klik på pause-switch, så polleren
+    // ikke reverterer switchen før daemonen når at opdatere status.
+    let pause_lockout = Arc::new(AtomicBool::new(false));
 
-    // Pause switch: bruger-toggle → Pause/Resume kommando.
-    // Ved fejl: revert switch (blocked handler) + ÉN toast. Ingen auto-retry.
+    // Pause switch: bruger-toggle → pause/resume (global jottad pause).
+    // pause/resume pauser HELE jottad (backup + sync) — matcher UI-label.
+    // Idempotent: "already running" ved resume = allerede aktiv = success.
+    // Lockout: efter bruger-klik sættes pause_lockout=true i 5s så polleren
+    // ikke reverterer switchen før daemonen når at opdatere status.
     {
         let pause_updating = pause_updating.clone();
         let pause_switch = pause_switch.clone();
         let toast_tx = toast_tx.clone();
+        let pause_lockout = pause_lockout.clone();
         pause_switch.connect_state_set(move |_sw, state| {
             // Guard: programmatisk opdatering fra polleren — gør ingenting.
             if pause_updating.get() {
                 return Propagation::Proceed;
             }
+            // state=true → resume (unpause), state=false → pause
             let cmd = if state {
                 JottaCommand::Resume
             } else {
                 JottaCommand::Pause
             };
+            // Sæt lockout så polleren ikke reverterer før status opdateres.
+            // 15s: jottad kan være langsom til at opdatere status efter pause.
+            pause_lockout.store(true, Ordering::SeqCst);
+            {
+                let lockout = pause_lockout.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(15));
+                    lockout.store(false, Ordering::SeqCst);
+                });
+            }
             let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
                     if let Err(e) = client.run(&cmd) {
-                        // Fejl: ÉN toast. Switch reverteres ved næste poll
-                        // (status uændret → poller sætter den tilbage).
+                        let msg = e.to_string();
+                        // "already running" ved resume = idempotent success.
+                        if msg.contains("already running") {
+                            return;
+                        }
                         let _ = toast_tx.send(format!("Kunne ikke ændre pause: {e}"));
                     }
                 }
@@ -759,8 +864,13 @@ Vil du erstatte den?",
     // `trash list` has no --json and plain output is unparseable (single
     // space-separated line with filenames containing spaces).
     restore_trash_web_btn.connect_clicked(move |_| {
-        // gtk::show_uri returns () in gtk4-rs 0.9 (not Result).
-        gtk::show_uri(None::<&gtk::Window>, "https://www.jottacloud.com/web/trash", 0);
+        // gtk::UriLauncher (GTK 4.10+) — replacement for deprecated gtk::show_uri.
+        let launcher = gtk::UriLauncher::new("https://www.jottacloud.com/web/trash");
+        launcher.launch(None::<&gtk::Window>, None::<&gtk::gio::Cancellable>, |res| {
+            if let Err(e) = res {
+                eprintln!("jotta-gui: could not open trash URL: {e}");
+            }
+        });
     });
 
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
@@ -774,6 +884,7 @@ Vil du erstatte den?",
         usage_label: status_usage_label.clone(),
         pause_switch: pause_switch.clone(),
         pause_updating: pause_updating.clone(),
+        pause_lockout: pause_lockout.clone(),
         backup_list: backup_list.clone(),
         sync_switch: sync_switch.clone(),
         sync_updating: sync_updating.clone(),
@@ -784,18 +895,25 @@ Vil du erstatte den?",
     // Only Status (plain data) crosses the thread boundary via this channel.
     // The main loop applies it to the widgets; widgets never leave this thread.
     let (status_tx, status_rx) = std::sync::mpsc::channel::<Status>();
-    std::thread::spawn(move || loop {
-        let status = match poll_client.status() {
-            Ok(v) => Status::from_json(&v),
-            Err(_) => Status::default(),
-        };
-        {
-            let mut guard = poll_status.lock().unwrap();
-            *guard = status.clone();
-        }
-        let _ = status_tx.send(status);
-        std::thread::sleep(Duration::from_secs(3));
-    });
+    {
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || loop {
+            // Stop poller når app lukker (sidste vindue væk).
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let status = match poll_client.status() {
+                Ok(v) => Status::from_json(&v),
+                Err(_) => Status::default(),
+            };
+            {
+                let mut guard = poll_status.lock().unwrap();
+                *guard = status.clone();
+            }
+            let _ = status_tx.send(status);
+            std::thread::sleep(Duration::from_secs(3));
+        });
+    }
     {
         let status_rx = std::sync::Mutex::new(status_rx);
         let ui = ui.clone();
@@ -816,6 +934,54 @@ Vil du erstatte den?",
     }
     ui.apply(&initial);
 
+    // Skriv GUI PID-fil så tray kan lukke GUI ved "Afslut".
+    let gui_pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("jotta-gui.pid");
+    let _ = std::fs::write(&gui_pid_file, std::process::id().to_string());
+
+    // Når vinduet lukkes: tjek minimize-to-tray indstilling.
+    // Hvis AKTIV: skjul vinduet (minimer til tray) i stedet for at afslutte.
+    // Hvis INAKTIV: afslut processen som normalt.
+    {
+        let shutdown = shutdown.clone();
+        let gui_pid_file = gui_pid_file.clone();
+        let window = window.clone();
+        window.connect_close_request(move |window| {
+            // Læs minimize-to-tray indstilling
+            let config_path = std::env::var("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".config")
+                })
+                .join("jotta-desktop")
+                .join("settings.conf");
+            let mtt = std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("minimize_to_tray="))
+                        .map(|l| l.trim_end() == "minimize_to_tray=true")
+                })
+                .unwrap_or(true); // Standard: AKTIV
+
+            if mtt {
+                // Minimer til tray: skjul vinduet, behold processen kørende.
+                window.set_visible(false);
+                glib::Propagation::Stop
+            } else {
+                // Normal luk: afslut processen.
+                shutdown.store(true, Ordering::SeqCst);
+                let _ = std::fs::remove_file(&gui_pid_file);
+                std::process::exit(0);
+            }
+        });
+    }
+
     window.present();
 }
 
@@ -829,6 +995,8 @@ struct StatusWidgets {
     /// Guard: true mens polleren opdaterer switchen programmatisk.
     /// connect_state_set-handleren returnerer tidligt når denne er true.
     pause_updating: std::rc::Rc<Cell<bool>>,
+    /// Lockout: true i 5s efter bruger-klik; polleren må ikke opdatere pause-switch.
+    pause_lockout: Arc<AtomicBool>,
     backup_list: gtk::ListBox,
     sync_switch: gtk::Switch,
     /// Guard: true mens polleren opdaterer switchen programmatisk.
@@ -848,6 +1016,7 @@ impl Clone for StatusWidgets {
             usage_label: self.usage_label.clone(),
             pause_switch: self.pause_switch.clone(),
             pause_updating: self.pause_updating.clone(),
+            pause_lockout: self.pause_lockout.clone(),
             backup_list: self.backup_list.clone(),
             sync_switch: self.sync_switch.clone(),
             sync_updating: self.sync_updating.clone(),
@@ -894,8 +1063,13 @@ impl StatusWidgets {
         // Pause switch — guard forhindrer feedback-loop:
         // programmatisk set_active trigger IKKE connect_state_set-handleren.
         // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
-        let pause_active = status.state == State::Paused;
-        if self.pause_switch.is_active() != pause_active {
+        // Lockout: efter bruger-klik venter vi 15s før poller må opdatere switchen.
+        // paused == None betyder "ukendt" — jottad kører, så vi sætter ON (= kører).
+        // paused == Some(true) → OFF (= pauset). paused == Some(false) → ON (= kører).
+        let pause_active = status.paused != Some(true);
+        if self.pause_switch.is_active() != pause_active
+            && !self.pause_lockout.load(Ordering::SeqCst)
+        {
             self.pause_updating.set(true);
             self.pause_switch.set_active(pause_active);
             self.pause_updating.set(false);
@@ -1024,6 +1198,18 @@ fn rebuild_backup_list(
     }
 }
 
+
+/// Wrap a page widget in a ScrolledWindow so it can scroll when content overflows.
+/// gtk::Stack itself is not scrollable; each page must handle its own scrolling.
+fn scrollable_page(page: &gtk::Widget) -> gtk::ScrolledWindow {
+    let scrolled = gtk::ScrolledWindow::new();
+    scrolled.set_child(Some(page));
+    scrolled.set_vexpand(true);
+    scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+    scrolled
+}
+
 fn build_status_page(
     state_label: &gtk::Label,
     email_label: &gtk::Label,
@@ -1060,7 +1246,7 @@ fn build_status_page(
     box_.append(usage_label);
     box_.append(level);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
@@ -1070,16 +1256,18 @@ fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.set_child(Some(list));
     scrolled.set_vexpand(true);
+    scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
     box_.append(&scrolled);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn build_sync_page(group: &adw::PreferencesGroup) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
     box_.append(group);
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 fn replace_add_button(page: &gtk::Widget, new_btn: &gtk::Button) {
@@ -1092,10 +1280,63 @@ fn nav_item(label: &str) -> gtk::Widget {
     gtk::Label::new(Some(label)).upcast()
 }
 
-fn placeholder(title: &str) -> gtk::Widget {
-    let label = gtk::Label::new(Some(&format!("{title} — under udvikling")));
-    label.set_vexpand(true);
-    label.upcast()
+/// Byg Indstillinger-siden med minimize-to-tray switch.
+fn build_settings_page() -> gtk::Widget {
+    let group = adw::PreferencesGroup::builder()
+        .title("Generelt")
+        .build();
+
+    // Minimize-to-tray: når aktiv, minimeres vinduet til tray ved luk i stedet
+    // for at afslutte. Gemmes i en konfigurationsfil.
+    let mtt_row = adw::ActionRow::builder()
+        .title("Minimer til systembakke ved luk")
+        .subtitle("Vinduet minimeres til systembakken i stedet for at lukke")
+        .build();
+    let mtt_switch = gtk::Switch::new();
+    mtt_switch.set_valign(gtk::Align::Center);
+    // Læs nuværende værdi fra konfigurationsfil
+    let config_path = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf");
+    let mtt_enabled = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("minimize_to_tray=")).map(|l| l.trim_end() == "minimize_to_tray=true"))
+        .unwrap_or(true); // Standard: AKTIV
+    mtt_switch.set_active(mtt_enabled);
+    mtt_switch.connect_state_set(move |sw, state| {
+        let config_path = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("jotta-desktop")
+            .join("settings.conf");
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content = format!("minimize_to_tray={}\n", state);
+        let _ = std::fs::write(&config_path, content);
+        sw.set_active(state);
+        Propagation::Proceed
+    });
+    mtt_row.add_suffix(&mtt_switch);
+    mtt_row.set_activatable_widget(Some(&mtt_switch));
+    group.add(&mtt_row);
+
+    let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_widget, 12);
+    box_widget.append(&group);
+    scrollable_page(&box_widget.upcast()).upcast()
 }
 
 /// Parse `jotta-cli ignores list --json` output (backup ignores).
@@ -1220,15 +1461,12 @@ fn build_sync_selective_dialog(
     currently_ignored: &[String],
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some("Vælg mapper at synkronisere"));
-    dialog.set_transient_for(Some(parent));
-    dialog.set_modal(true);
-    dialog.set_default_width(420);
-    dialog.set_default_height(480);
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Vælg mapper at synkronisere");
+    dialog.set_content_width(420);
+    dialog.set_content_height(480);
 
-    let content = dialog.content_area();
-    content.set_spacing(12);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
     let intro = gtk::Label::new(Some(&format!(
@@ -1265,31 +1503,73 @@ fn build_sync_selective_dialog(
     scrolled.set_min_content_height(200);
     content.append(&scrolled);
 
-    dialog.add_button("Annuller", gtk::ResponseType::Cancel);
-    let apply_btn = dialog.add_button("Anvend", gtk::ResponseType::Apply);
-    apply_btn.add_css_class("suggested-action");
-    dialog.set_default_response(gtk::ResponseType::Apply);
+    // ToolbarView with header bar: Cancel (start) + Apply (end) + window controls.
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    // FEATURE: Dialog skal kunne lukkes og flyttes — vis window controls.
+    header.set_show_start_title_buttons(true);
+    header.set_show_end_title_buttons(true);
 
+    let dialog_cancel = dialog.clone();
+    let cancel_btn = gtk::Button::with_label("Annuller");
+    cancel_btn.connect_clicked(move |_| {
+        dialog_cancel.close();
+    });
+    header.pack_start(&cancel_btn);
+
+    let dialog_apply = dialog.clone();
     let toast_tx = toast_tx.clone();
     let currently_ignored = currently_ignored.to_vec();
-    dialog.connect_response(move |dlg, response| {
-        if response == gtk::ResponseType::Apply {
-            let mut to_add: Vec<String> = Vec::new();
-            let mut to_remove: Vec<String> = Vec::new();
-            for (folder, cb) in &checkboxes {
-                let was_ignored = currently_ignored.iter().any(|i| i == folder);
-                let is_checked = cb.is_active();
-                if was_ignored && is_checked {
-                    to_remove.push(folder.clone());
-                } else if !was_ignored && !is_checked {
-                    to_add.push(folder.clone());
-                }
+    let apply_btn = gtk::Button::with_label("Anvend");
+    apply_btn.add_css_class("suggested-action");
+    apply_btn.connect_clicked(move |_| {
+        let mut to_add: Vec<String> = Vec::new();
+        let mut to_remove: Vec<String> = Vec::new();
+        for (folder, cb) in &checkboxes {
+            let was_ignored = currently_ignored.iter().any(|i| i == folder);
+            let is_checked = cb.is_active();
+            if was_ignored && is_checked {
+                to_remove.push(folder.clone());
+            } else if !was_ignored && !is_checked {
+                to_add.push(folder.clone());
             }
-            let toast_tx = toast_tx.clone();
-            std::thread::spawn(move || {
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    let mut errors = Vec::new();
+        }
+        let toast_tx = toast_tx.clone();
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                let mut errors = Vec::new();
+                // FIX: sync selective kræver at sync kører. Hvis add/rem fejler
+                // med "syncapp not...", prøv at starte sync først og retry én gang.
+                let mut needs_sync_start = false;
+                for name in &to_add {
+                    match client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            if msg.contains("syncapp") || msg.contains("not running") || msg.contains("not enabled") {
+                                needs_sync_start = true;
+                            }
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                }
+                for name in &to_remove {
+                    match client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            if msg.contains("syncapp") || msg.contains("not running") || msg.contains("not enabled") {
+                                needs_sync_start = true;
+                            }
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                }
+                // Retry én gang efter sync start hvis nødvendigt.
+                if needs_sync_start && !errors.is_empty() {
+                    let _ = client.run(&JottaCommand::SyncStart);
+                    errors.clear();
                     for name in &to_add {
                         if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
                             errors.push(format!("{name}: {e}"));
@@ -1300,24 +1580,29 @@ fn build_sync_selective_dialog(
                             errors.push(format!("{name}: {e}"));
                         }
                     }
-                    let msg = if errors.is_empty() {
-                        let n = to_add.len() + to_remove.len();
-                        if n == 0 {
-                            "Ingen ændringer".to_string()
-                        } else {
-                            format!("{n} mappevalg opdateret")
-                        }
-                    } else {
-                        format!("Fejl: {}", errors.join(", "))
-                    };
-                    let _ = toast_tx.send(msg);
                 }
-            });
-        }
-        dlg.close();
+                let msg = if errors.is_empty() {
+                    let n = to_add.len() + to_remove.len();
+                    if n == 0 {
+                        "Ingen ændringer".to_string()
+                    } else {
+                        format!("{n} mappevalg opdateret")
+                    }
+                } else {
+                    format!("Fejl: {}", errors.join(", "))
+                };
+                let _ = toast_tx.send(msg);
+            }
+        });
+        dialog_apply.close();
     });
+    header.pack_end(&apply_btn);
 
-    dialog.present();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar));
+
+    dialog.present(Some(parent));
 }
 
 /// Open the backup-ignores dialog for ONE specific backup folder.
@@ -1333,15 +1618,12 @@ fn open_backup_ignores_dialog(
     backup_path: &str,
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
-    let dialog = gtk::Dialog::new();
-    dialog.set_title(Some(&format!("Udeluk fra backup: {backup_name}")));
-    dialog.set_transient_for(Some(window));
-    dialog.set_modal(true);
-    dialog.set_default_width(480);
-    dialog.set_default_height(520);
+    let dialog = adw::Dialog::new();
+    dialog.set_title(&format!("Udeluk fra backup: {backup_name}"));
+    dialog.set_content_width(480);
+    dialog.set_content_height(520);
 
-    let content = dialog.content_area();
-    content.set_spacing(12);
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
     let scope_model = gtk::StringList::new(&["Denne backup", "Alle backups"]);
@@ -1424,7 +1706,7 @@ fn open_backup_ignores_dialog(
     let backup_name2 = backup_name.to_string();
     let scope_row2 = scope_row.clone();
     let patterns_list2 = patterns_list.clone();
-    let dialog_weak = dialog.downgrade();
+    let dialog_parent = dialog.clone();
     pattern_entry.connect_apply(move |entry| {
         let pattern = entry.text().to_string();
         if pattern.trim().is_empty() {
@@ -1457,8 +1739,7 @@ fn open_backup_ignores_dialog(
         let backup_name = backup_name2.clone();
         let pattern_clone = pattern.clone();
         let backup_clone = backup.clone();
-        let Some(dlg) = dialog_weak.upgrade() else { return };
-        confirm.choose(&dlg, None::<&gtk::gio::Cancellable>, move |resp| {
+        confirm.choose(&dialog_parent, None::<&gtk::gio::Cancellable>, move |resp| {
             if resp == "add" {
                 // Refresh channel: worker sends Vec<String>, main thread rebuilds.
                 // The patterns_list widget never crosses the thread boundary.
@@ -1489,7 +1770,14 @@ fn open_backup_ignores_dialog(
                         match client.run(&JottaCommand::IgnoreAdd { pattern: pattern.clone(), backup: backup.clone() }) {
                             Ok(_) => {
                                 let _ = toast_tx.send(format!("Mønster tilføjet: {pattern}"));
-                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: Some(backup_name.clone()) }) {
+                                // FIX: Refresh skal følge samme scope som add.
+                                // "Denne backup" → Some(name), "Alle backups" → None.
+                                let refresh_scope = if backup.is_some() {
+                                    Some(backup_name.clone())
+                                } else {
+                                    None
+                                };
+                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: refresh_scope }) {
                                     let patterns = parse_ignores(&v);
                                     let _ = refresh_tx.send(patterns);
                                 }
@@ -1505,13 +1793,23 @@ fn open_backup_ignores_dialog(
         entry.set_text("");
     });
 
-    dialog.add_button("Luk", gtk::ResponseType::Close);
-    dialog.set_default_response(gtk::ResponseType::Close);
-    dialog.connect_response(move |dlg, _| {
-        dlg.close();
+    // ToolbarView with header bar: Luk button + window controls.
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    // FEATURE: Dialog skal kunne lukkes og flyttes — vis window controls.
+    header.set_show_start_title_buttons(true);
+    header.set_show_end_title_buttons(true);
+    let dialog_close = dialog.clone();
+    let close_btn = gtk::Button::with_label("Luk");
+    close_btn.connect_clicked(move |_| {
+        dialog_close.close();
     });
+    header.pack_end(&close_btn);
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar));
 
-    dialog.present();
+    dialog.present(Some(window));
 }
 
 fn rebuild_backup_ignores_list(
@@ -1658,7 +1956,7 @@ fn build_restore_page(
     box_.append(&trash_title);
     box_.append(trash_group);
 
-    box_.upcast()
+    scrollable_page(&box_.upcast()).upcast()
 }
 
 /// Navigation result from a worker thread: plain data only.

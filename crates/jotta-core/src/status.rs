@@ -108,8 +108,15 @@ impl Status {
             .or_else(|| v.path(&["usage", "quota"]))
             .and_then(as_u64);
 
-        // Paused: not in the verified schema; keep tolerant lookup.
-        s.paused = v.path(&["paused"]).and_then(|x| x.as_bool());
+        // Paused: jotta-cli status --json rapporterer ikke altid et "paused" felt.
+        // Vi kigger efter flere mulige nøgler (case-tolerant via get_ci).
+        // Hvis ingen findes, forbliver paused = None (ukendt — ikke "ikke pauset").
+        s.paused = v
+            .path(&["paused"])
+            .or_else(|| v.path(&["Paused"]))
+            .or_else(|| v.path(&["State", "Paused"]))
+            .or_else(|| v.path(&["state", "paused"]))
+            .and_then(|x| x.as_bool());
 
         // Active transfers (verified schema: State.Uploading / .Downloading are
         // objects; non-empty means something is in flight). Tolerant fallback

@@ -55,10 +55,13 @@ pub enum JottaCommand {
     Status,
     /// `login`: interactive auth (opens a browser on the host).
     Login,
-    /// Pause everything.
+    /// Pause everything. `jotta-cli pause <duration>` — duration is required.
+    /// We use 87600h (10 years) = effectively indefinite until manual resume.
     Pause,
     /// Resume everything.
     Resume,
+    /// `config set <key> <value>` — sæt en config-værdi (fx syncpaused).
+    ConfigSet { key: String, value: String },
     /// Add a folder to backup.
     BackupAdd(PathBuf),
     /// Remove a backup folder by name.
@@ -147,8 +150,13 @@ impl JottaCommand {
         match self {
             JottaCommand::Status => push(&mut args, &["status", "--json"]),
             JottaCommand::Login => push(&mut args, &["login"]),
-            JottaCommand::Pause => push(&mut args, &["pause"]),
+            JottaCommand::Pause => push(&mut args, &["pause", "87600h"]),
             JottaCommand::Resume => push(&mut args, &["resume"]),
+            JottaCommand::ConfigSet { key, value } => {
+                push(&mut args, &["config", "set"]);
+                args.push(key.clone());
+                args.push(value.clone());
+            }
             JottaCommand::BackupAdd(p) => {
                 push(&mut args, &["add"]);
                 args.push(p.to_string_lossy().into_owned());
@@ -444,6 +452,11 @@ mod tests {
             JottaCommand::TrashPurge("Backup/Laptop/file.txt".into()).argv(),
             vec!["trash", "purge", "Backup/Laptop/file.txt"]
         );
+        // ConfigSet: config set <key> <value>
+        assert_eq!(
+            JottaCommand::ConfigSet { key: "syncpaused".into(), value: "true".into() }.argv(),
+            vec!["config", "set", "syncpaused", "true"]
+        );
     }
 
     #[test]
@@ -452,6 +465,7 @@ mod tests {
         assert!(JottaCommand::IgnoresList { backup: None }.is_json());
         assert!(JottaCommand::SyncSelectiveList.is_json());
         assert!(!JottaCommand::Pause.is_json());
+        assert_eq!(JottaCommand::Pause.argv(), vec!["pause", "87600h"]);
         assert!(!JottaCommand::IgnoreAdd { pattern: "x".into(), backup: None }.is_json());
         assert!(!JottaCommand::SyncSelectiveAdd("x".into()).is_json());
         // ListDownloadInfo is JSON only when json=true.
