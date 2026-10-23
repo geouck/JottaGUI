@@ -170,6 +170,10 @@ pub struct DownloadEntry {
     pub local_dest: String,
     /// Whether the download has failed (stays in list) or is ongoing.
     pub status: DownloadStatus,
+    /// Error messages from the "Errors" object (empty if no errors).
+    /// VERIFICeret (Fedora, 2026): `list downloaderrors` KRÆVER --downloadid,
+    /// så vi udleder fejlbeskeder direkte fra hver download-entry.
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,14 +267,253 @@ pub fn parse_downloads_json(v: &Value) -> Vec<DownloadEntry> {
                 .unwrap_or("")
                 .to_string();
 
+            // Errors: extract message strings from the "Errors" object/array.
+            // VERIFICeret: `list downloaderrors` kræver --downloadid, så vi
+            // udleder fejlbeskeder direkte fra hver entry's "Errors" felt.
+            let errors = extract_error_messages(item);
+
             Some(DownloadEntry {
                 id,
                 remote_path,
                 local_dest,
                 status,
+                errors,
             })
         })
         .collect()
+}
+
+/// One upload from `jotta-cli list uploads --json`.
+///
+/// Schema is expected to mirror `list downloads --json` (same CLI family):
+/// array of objects with Id/Remote/Local/Total/Remaining/StartedTimeMs/etc.
+/// Parser is case-tolerant and tolerant of empty objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadEntry {
+    /// The upload ID.
+    pub id: String,
+    /// Remote path being uploaded (e.g. local file → remote).
+    pub remote_path: String,
+    /// Local source path.
+    pub local_path: String,
+    /// Whether the upload has failed or is ongoing.
+    pub status: UploadStatus,
+    /// Error messages from the "Errors" object (empty if no errors).
+    /// VERIFICeret (Fedora, 2026): `list uploaderrors` KRÆVER --uploadid,
+    /// så vi udleder fejlbeskeder direkte fra hver upload-entry.
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadStatus {
+    Ongoing,
+    Failed,
+    Completed,
+}
+
+/// Parse `jotta-cli list uploads --json` output.
+///
+/// Expected schema mirrors `list downloads --json`:
+/// - Array of objects with Id/Remote/Local/Total/Remaining keys (case-tolerant).
+/// - Object with "uploads" or "Uploads" array wrapper.
+/// - Empty objects tolerated (Remaining/Errors can be `{}`).
+pub fn parse_uploads_json(v: &Value) -> Vec<UploadEntry> {
+    let arr = get_ci(v, "uploads")
+        .and_then(|x| x.as_array())
+        .or_else(|| match v {
+            Value::Array(a) => Some(a.as_slice()),
+            _ => None,
+        });
+    let Some(arr) = arr else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let id = as_str_ci(item, "Id")
+                .or_else(|| as_str_ci(item, "id"))
+                .or_else(|| as_str_ci(item, "uploadid"))
+                .or_else(|| as_str_ci(item, "uploadId"))?
+                .to_string();
+
+            let status = {
+                if let Some(s) = as_str_ci(item, "status")
+                    .or_else(|| as_str_ci(item, "state"))
+                    .map(|s| s.to_lowercase())
+                {
+                    match s.as_str() {
+                        "failed" | "error" | "errored" => UploadStatus::Failed,
+                        "completed" | "complete" | "done" | "finished" => {
+                            UploadStatus::Completed
+                        }
+                        _ => UploadStatus::Ongoing,
+                    }
+                } else {
+                    let completed = get_ci(item, "CompletedTimeMs").is_some()
+                        || get_ci(item, "completedtimems").is_some();
+                    let errors = get_ci(item, "Errors")
+                        .map(|e| match e {
+                            Value::Object(m) => !m.is_empty(),
+                            Value::Array(a) => !a.is_empty(),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
+                    if errors {
+                        UploadStatus::Failed
+                    } else if completed {
+                        UploadStatus::Completed
+                    } else {
+                        UploadStatus::Ongoing
+                    }
+                }
+            };
+
+            let remote_path = as_str_ci(item, "Remote")
+                .or_else(|| as_str_ci(item, "remote"))
+                .or_else(|| as_str_ci(item, "remotepath"))
+                .or_else(|| as_str_ci(item, "remotePath"))
+                .unwrap_or("")
+                .to_string();
+
+            let local_path = as_str_ci(item, "Local")
+                .or_else(|| as_str_ci(item, "local"))
+                .or_else(|| as_str_ci(item, "source"))
+                .or_else(|| as_str_ci(item, "localsource"))
+                .or_else(|| as_str_ci(item, "localSource"))
+                .unwrap_or("")
+                .to_string();
+
+            let errors = extract_error_messages(item);
+
+            Some(UploadEntry {
+                id,
+                remote_path,
+                local_path,
+                status,
+                errors,
+            })
+        })
+        .collect()
+}
+
+/// One transfer error from `jotta-cli list downloaderrors --json` or
+/// `jotta-cli list uploaderrors --json`.
+///
+/// Schema is undocumented; tolerant parsing of common shapes:
+/// - Array of objects with error/message/path keys.
+/// - Object with "errors"/"Errors" array wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferError {
+    /// The transfer ID (download or upload ID) this error belongs to.
+    pub transfer_id: Option<String>,
+    /// The file/path that caused the error.
+    pub path: Option<String>,
+    /// The error message.
+    pub message: String,
+}
+
+/// Collect transfer errors from download + upload entries.
+///
+/// VERIFICeret (Fedora, 2026): `list downloaderrors` og `list uploaderrors`
+/// KRÆVER hhv. --downloadid / --uploadid — der er ingen "list alle"-mode.
+/// Fejlbeskeder udledes derfor direkte fra hver entry's "Errors"-objekt.
+///
+/// Returns a combined Vec<TransferError> with download errors first,
+/// then upload errors.
+pub fn collect_transfer_errors(
+    downloads: &[DownloadEntry],
+    uploads: &[UploadEntry],
+) -> Vec<TransferError> {
+    let mut errors = Vec::new();
+    for d in downloads {
+        for msg in &d.errors {
+            errors.push(TransferError {
+                transfer_id: Some(d.id.clone()),
+                path: Some(d.remote_path.clone()),
+                message: msg.clone(),
+            });
+        }
+    }
+    for u in uploads {
+        for msg in &u.errors {
+            errors.push(TransferError {
+                transfer_id: Some(u.id.clone()),
+                path: Some(u.local_path.clone()),
+                message: msg.clone(),
+            });
+        }
+    }
+    errors
+}
+
+/// Parse `jotta-cli list downloaderrors --json` or `list uploaderrors --json`.
+///
+/// Tolerant of several shapes:
+/// - `[{"id": "...", "path": "...", "message": "..."}]`
+/// - `{"errors": [{"message": "..."}]}`
+/// - `[{"error": "..."}]` (bare string in "error" key)
+pub fn parse_transfer_errors_json(v: &Value) -> Vec<TransferError> {
+    let arr = get_ci(v, "errors")
+        .and_then(|x| x.as_array())
+        .or_else(|| match v {
+            Value::Array(a) => Some(a.as_slice()),
+            _ => None,
+        });
+    let Some(arr) = arr else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let transfer_id = as_str_ci(item, "id")
+                .or_else(|| as_str_ci(item, "downloadid"))
+                .or_else(|| as_str_ci(item, "downloadId"))
+                .or_else(|| as_str_ci(item, "uploadid"))
+                .or_else(|| as_str_ci(item, "uploadId"))
+                .map(str::to_owned);
+            let path = as_str_ci(item, "path")
+                .or_else(|| as_str_ci(item, "file"))
+                .or_else(|| as_str_ci(item, "remote"))
+                .map(str::to_owned);
+            let message = as_str_ci(item, "message")
+                .or_else(|| as_str_ci(item, "error"))
+                .or_else(|| as_str_ci(item, "reason"))
+                .or_else(|| as_str_ci(item, "description"))
+                .unwrap_or("Ukendt fejl")
+                .to_string();
+            Some(TransferError {
+                transfer_id,
+                path,
+                message,
+            })
+        })
+        .collect()
+}
+
+/// Extract error message strings from an "Errors" object or array.
+///
+/// Real schema (Fedora, 2026): `"Errors": {"some_error": "file not found"}`
+/// or `"Errors": {}` (empty = no errors). Also tolerates arrays of strings
+/// or objects with message/error keys.
+fn extract_error_messages(item: &Value) -> Vec<String> {
+    let Some(errors_val) = get_ci(item, "Errors") else {
+        return Vec::new();
+    };
+    match errors_val {
+        Value::Object(map) => map
+            .values()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => as_str_ci(v, "message")
+                    .or_else(|| as_str_ci(v, "error"))
+                    .map(str::to_owned),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Build the remote path prefix for a backup folder.
@@ -536,5 +779,177 @@ mod tests {
         assert_eq!(backup_remote_path("Laptop", "Documents"), "Backup/Laptop/Documents");
         assert_eq!(sync_remote_path(), "Sync");
         assert_eq!(archive_remote_path(), "Archive");
+    }
+
+    // --- Iteration 7: uploads + transfer errors ---
+
+    /// Placeholder fixture for `list uploads --json` (mirrors downloads schema).
+    /// Owner will provide real JSON later.
+    const PLACEHOLDER_UPLOADS_JSON: &str = r#"[
+        {
+            "Id": "u1",
+            "Remote": "Sync/Documents/photo.jpg",
+            "Local": "/home/eske/Documents/photo.jpg",
+            "Total": {"Files": 1, "Bytes": 1048576},
+            "Remaining": {"Files": 1, "Bytes": 524288},
+            "StartedTimeMs": 1792743158517,
+            "SelectionCount": {},
+            "Errors": {}
+        },
+        {
+            "Id": "u2",
+            "Remote": "Backup/Laptop/CV.pdf",
+            "Local": "/home/eske/Documents/CV.pdf",
+            "Total": {"Files": 1, "Bytes": 245760},
+            "Remaining": {},
+            "StartedTimeMs": 1792743000000,
+            "CompletedTimeMs": 1792743100000,
+            "SelectionCount": {},
+            "Errors": {}
+        },
+        {
+            "Id": "u3",
+            "Remote": "Sync/broken.txt",
+            "Local": "/home/eske/Documents/broken.txt",
+            "Total": {"Files": 1, "Bytes": 100},
+            "Remaining": {"Files": 1, "Bytes": 100},
+            "StartedTimeMs": 1792742000000,
+            "SelectionCount": {},
+            "Errors": {"io_error": "permission denied"}
+        }
+    ]"#;
+
+    #[test]
+    fn parses_uploads_placeholder_schema() {
+        let v = json::parse(PLACEHOLDER_UPLOADS_JSON).unwrap();
+        let entries = parse_uploads_json(&v);
+        assert_eq!(entries.len(), 3);
+
+        // u1: ongoing
+        assert_eq!(entries[0].id, "u1");
+        assert_eq!(entries[0].remote_path, "Sync/Documents/photo.jpg");
+        assert_eq!(entries[0].local_path, "/home/eske/Documents/photo.jpg");
+        assert_eq!(entries[0].status, UploadStatus::Ongoing);
+
+        // u2: completed
+        assert_eq!(entries[1].id, "u2");
+        assert_eq!(entries[1].status, UploadStatus::Completed);
+
+        // u3: failed
+        assert_eq!(entries[2].id, "u3");
+        assert_eq!(entries[2].status, UploadStatus::Failed);
+    }
+
+    #[test]
+    fn parses_uploads_wrapped_and_empty() {
+        // Wrapped in {"uploads": [...]}.
+        let v = json::parse(r#"{"uploads": [{"id": "x1", "status": "ongoing", "remote": "Sync/a.txt", "local": "/tmp/a.txt"}]}"#).unwrap();
+        let entries = parse_uploads_json(&v);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "x1");
+        assert_eq!(entries[0].status, UploadStatus::Ongoing);
+
+        // Empty.
+        let v = json::parse(r#"[]"#).unwrap();
+        assert!(parse_uploads_json(&v).is_empty());
+        let v = json::parse(r#"{}"#).unwrap();
+        assert!(parse_uploads_json(&v).is_empty());
+    }
+
+    #[test]
+    fn parses_transfer_errors_array() {
+        let v = json::parse(r#"[
+            {"id": "d1", "path": "Backup/Laptop/file.pdf", "message": "Network timeout"},
+            {"downloadid": "d2", "file": "Sync/broken.txt", "error": "Permission denied"}
+        ]"#).unwrap();
+        let errors = parse_transfer_errors_json(&v);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].transfer_id.as_deref(), Some("d1"));
+        assert_eq!(errors[0].path.as_deref(), Some("Backup/Laptop/file.pdf"));
+        assert_eq!(errors[0].message, "Network timeout");
+        assert_eq!(errors[1].transfer_id.as_deref(), Some("d2"));
+        assert_eq!(errors[1].path.as_deref(), Some("Sync/broken.txt"));
+        assert_eq!(errors[1].message, "Permission denied");
+    }
+
+    #[test]
+    fn parses_transfer_errors_wrapped_and_empty() {
+        // Wrapped in {"errors": [...]}.
+        let v = json::parse(r#"{"errors": [{"message": "Disk full"}]}"#).unwrap();
+        let errors = parse_transfer_errors_json(&v);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "Disk full");
+        assert!(errors[0].transfer_id.is_none());
+        assert!(errors[0].path.is_none());
+
+        // Empty.
+        let v = json::parse(r#"[]"#).unwrap();
+        assert!(parse_transfer_errors_json(&v).is_empty());
+        let v = json::parse(r#"{}"#).unwrap();
+        assert!(parse_transfer_errors_json(&v).is_empty());
+    }
+
+    #[test]
+    fn extracts_errors_from_download_entry() {
+        // Real schema: Errors is an object with key→message.
+        let v = json::parse(r#"[
+            {"Id": "d1", "Remote": "Backup/x.pdf", "Local": "/tmp/x.pdf", "Errors": {"io_error": "file not found"}},
+            {"Id": "d2", "Remote": "Sync/y.txt", "Local": "/tmp/y.txt", "Errors": {}}
+        ]"#).unwrap();
+        let entries = parse_downloads_json(&v);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].errors, vec!["file not found".to_string()]);
+        assert!(entries[1].errors.is_empty());
+    }
+
+    #[test]
+    fn extracts_errors_from_upload_entry() {
+        let v = json::parse(r#"[
+            {"Id": "u1", "Remote": "Sync/a.txt", "Local": "/tmp/a.txt", "Errors": {"net_err": "timeout"}},
+            {"Id": "u2", "Remote": "Backup/b.txt", "Local": "/tmp/b.txt", "Errors": {}}
+        ]"#).unwrap();
+        let entries = parse_uploads_json(&v);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].errors, vec!["timeout".to_string()]);
+        assert!(entries[1].errors.is_empty());
+    }
+
+    #[test]
+    fn collects_transfer_errors_from_entries() {
+        let v_dl = json::parse(r#"[
+            {"Id": "d1", "Remote": "Backup/x.pdf", "Local": "/tmp/x.pdf", "Errors": {"io": "not found"}}
+        ]"#).unwrap();
+        let downloads = parse_downloads_json(&v_dl);
+
+        let v_ul = json::parse(r#"[
+            {"Id": "u1", "Remote": "Sync/a.txt", "Local": "/home/a.txt", "Errors": {"net": "timeout"}}
+        ]"#).unwrap();
+        let uploads = parse_uploads_json(&v_ul);
+
+        let errors = collect_transfer_errors(&downloads, &uploads);
+        assert_eq!(errors.len(), 2);
+        // Download error first.
+        assert_eq!(errors[0].transfer_id.as_deref(), Some("d1"));
+        assert_eq!(errors[0].path.as_deref(), Some("Backup/x.pdf"));
+        assert_eq!(errors[0].message, "not found");
+        // Upload error second.
+        assert_eq!(errors[1].transfer_id.as_deref(), Some("u1"));
+        assert_eq!(errors[1].path.as_deref(), Some("/home/a.txt"));
+        assert_eq!(errors[1].message, "timeout");
+    }
+
+    #[test]
+    fn parses_uploads_empty_object() {
+        // VERIFICeret (Fedora, 2026): `list uploads --json` returnerer `{}`
+        // når der ikke er nogen uploads.
+        let v = json::parse(r#"{}"#).unwrap();
+        assert!(parse_uploads_json(&v).is_empty());
+    }
+
+    #[test]
+    fn parses_downloads_empty_object() {
+        // Samme for downloads.
+        let v = json::parse(r#"{}"#).unwrap();
+        assert!(parse_downloads_json(&v).is_empty());
     }
 }
