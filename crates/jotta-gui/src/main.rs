@@ -933,20 +933,22 @@ Vil du erstatte den?",
     });
 
     // --- Transfers poller: refresh uploads/downloads/errors every 5s ---
-    // Worker thread fetches plain data (Vec<UploadEntry>, Vec<DownloadEntry>,
-    // Vec<TransferError>) via mpsc; main thread rebuilds the lists.
+    // Worker thread fetches plain data (Vec<UploadEntry>, Vec<DownloadEntry>)
+    // via mpsc; main thread rebuilds the lists.
+    // VERIFICeret (Fedora, 2026): `list downloaderrors`/`list uploaderrors`
+    // KRÆVER --downloadid/--uploadid — der er ingen "list alle"-mode.
+    // Fejlbeskeder udledes därfor fra hver entry's "Errors"-objekt via
+    // jotta_core::remote::collect_transfer_errors().
     // Error dedup: only toast NEW errors (tracked in a HashSet on main thread).
     {
         let uploads_list = transfers_uploads_list.clone();
         let downloads_list = transfers_downloads_list.clone();
         let errors_list = transfers_errors_list.clone();
         let toast_tx = toast_tx.clone();
-        // Channel carries (uploads, downloads, dl_errors, ul_errors).
+        // Channel carries (uploads, downloads).
         let (tx, rx) = std::sync::mpsc::channel::<(
             Vec<jotta_core::remote::UploadEntry>,
             Vec<jotta_core::remote::DownloadEntry>,
-            Vec<jotta_core::remote::TransferError>,
-            Vec<jotta_core::remote::TransferError>,
         )>();
         let rx = Arc::new(Mutex::new(rx));
         // Seen errors for dedup (main thread only — Rc<RefCell<HashSet>>).
@@ -960,13 +962,15 @@ Vil du erstatte den?",
             let seen_errors = seen_errors.clone();
             glib::idle_add_local(move || {
                 let rx = rx.lock().unwrap();
-                while let Ok((uploads, downloads, dl_errors, ul_errors)) = rx.try_recv() {
+                while let Ok((uploads, downloads)) = rx.try_recv() {
                     rebuild_uploads_list(&uploads_list, &uploads);
                     rebuild_transfers_downloads_list(&downloads_list, &downloads);
-                    rebuild_transfer_errors_list(&errors_list, &dl_errors, &ul_errors);
+                    // Derive errors from entries (no separate CLI call needed).
+                    let errors = jotta_core::remote::collect_transfer_errors(&downloads, &uploads);
+                    rebuild_transfer_errors_list(&errors_list, &errors);
                     // Error dedup: toast only NEW errors.
                     let mut seen = seen_errors.borrow_mut();
-                    for err in dl_errors.iter().chain(ul_errors.iter()) {
+                    for err in &errors {
                         let key = format!("{}:{}", err.path.as_deref().unwrap_or(""), err.message);
                         if seen.insert(key) {
                             let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
@@ -985,6 +989,7 @@ Vil du erstatte den?",
                 }
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
+                    // VERIFICeret: `list uploads --json` returnerer `{}` ved ingen uploads.
                     let uploads = client
                         .run_json(&JottaCommand::ListUploads)
                         .map(|v| jotta_core::remote::parse_uploads_json(&v))
@@ -993,15 +998,7 @@ Vil du erstatte den?",
                         .run_json(&JottaCommand::ListDownloads)
                         .map(|v| jotta_core::remote::parse_downloads_json(&v))
                         .unwrap_or_default();
-                    let dl_errors = client
-                        .run_json(&JottaCommand::ListDownloadErrors { download_id: None, json: true })
-                        .map(|v| jotta_core::remote::parse_transfer_errors_json(&v))
-                        .unwrap_or_default();
-                    let ul_errors = client
-                        .run_json(&JottaCommand::ListUploadErrors { upload_id: None, json: true })
-                        .map(|v| jotta_core::remote::parse_transfer_errors_json(&v))
-                        .unwrap_or_default();
-                    let _ = tx.send((uploads, downloads, dl_errors, ul_errors));
+                    let _ = tx.send((uploads, downloads));
                 }
                 std::thread::sleep(Duration::from_secs(5));
             });
@@ -1565,16 +1562,15 @@ fn rebuild_transfers_downloads_list(
 }
 
 /// Rebuild the transfer errors list on the Overførsler page.
-/// Combines download errors + upload errors into one list.
+/// Errors are derived from download/upload entries (collect_transfer_errors).
 fn rebuild_transfer_errors_list(
     list: &gtk::ListBox,
-    dl_errors: &[jotta_core::remote::TransferError],
-    ul_errors: &[jotta_core::remote::TransferError],
+    errors: &[jotta_core::remote::TransferError],
 ) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
-    if dl_errors.is_empty() && ul_errors.is_empty() {
+    if errors.is_empty() {
         let row = adw::ActionRow::builder()
             .title("Ingen fejl")
             .subtitle("Overførselsfejl vises her")
@@ -1582,7 +1578,7 @@ fn rebuild_transfer_errors_list(
         list.append(&row);
         return;
     }
-    for err in dl_errors.iter().chain(ul_errors.iter()) {
+    for err in errors {
         let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
         let file_name = path_str.rsplit('/').next().unwrap_or(path_str);
         let row = adw::ActionRow::builder()

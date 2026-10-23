@@ -32,7 +32,9 @@ official GUI apps for Windows/macOS; on Linux there is only the CLI.
 - `trash list` has NO `--json` flag. Plain output is a single space-separated line (unparseable). Trash UI is web-only.
 - `ls Backup --json` lists ALL devices including dead/ghost ones ("Cannot find device") — browser must handle gracefully.
 - `download <remote> <dest> [--merge]`: `--merge` is only valid for folder sources (not files). The CLI prompts interactively if the destination file exists — the GUI must check and confirm BEFORE issuing the command (no TTY in spawned process).
-- `list` subcommands: `downloads` (has `--json`), `uploads` (expected `--json` for iteration 7), `downloaderrors --downloadid=<id>`, `uploaderrors`.
+- `list` subcommands: `downloads` (has `--json`), `uploads` (has `--json` — VERIFIED, returns `{}` when no uploads), `downloaderrors --downloadid=<id>` (REQUIRES `--downloadid` — no "list all" mode), `uploaderrors --uploadid=<id>` (REQUIRES `--uploadid` — no "list all" mode).
+- Transfer errors are derived from the `Errors` object inside each `list downloads --json` / `list uploads --json` entry (not from a separate `list downloaderrors`/`list uploaderrors` call without ID).
+- `login` has NO flags (only `-h`/`--help`). Login is 3 interactive prompts: (1) accept T&C, (2) Personal Login Token (from jottacloud.com/web/secure Security tab — single-use, short-lived), (3) device name. Login REQUIRES a running jottad AND a TTY — cannot be driven from the GUI (spawned processes have no TTY). DECISION: Account page will NOT implement token login. Instead, when status is NeedsLogin, the GUI shows a dialog with a UriLauncher button to https://www.jottacloud.com/web/secure, instructions to run `jotta-cli login` in a terminal, and a "Prøv igen" (retry) button. `JottaCommand` whitelist is NOT touched — login/logout never go through the GUI.
 - `status --json` does NOT reliably include a `paused` field. When paused is unknown (`None`), assume "running" (not paused).
 - RPM repo: `https://repo.jotta.cloud/redhat` (gpgkey `https://repo.jotta.cloud/jotta.gpg`, binary format - import via `gpg --enarmor` or let dnf import it from the repo file's gpgkey directive).
 
@@ -90,7 +92,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 4. ~~Icon theme (5 states + symbolic)~~ ✅ Iteration 4
 5. ~~Discover real `status --json` schema; tighten parser~~ ✅ Verified against owner's machine
 6. ~~Restore/download flow~~ ✅ Iteration 6 (PR #6)
-7. **Transfers page** (iteration 7, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloaderrors` + `list uploaderrors` + live feed via `observe`. Error dedup (one toast per unique error).
+7. ~~**Transfers page**~~ ✅ Iteration 7 (PR #11, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloads --json` polled every 5s. Error dedup (one toast per unique error). NOTE: `list downloaderrors`/`list uploaderrors` REQUIRE `--downloadid`/`--uploadid` (no "list all" mode) — errors are derived from the `Errors` object inside each download/upload entry via `collect_transfer_errors()`.
 8. **Settings/robustness** (iteration 8): expand Indstillinger page, error toasts, snapshot/restore points, daemon-not-responding state ("restart jottad via systemctl --user restart jottad") — see "Future features" below for details.
 9. **Flatpak**: pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
 
@@ -101,6 +103,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - **Info page**: a new page (or section on Status) showing device info, jottad version, jotta-cli version, account type/subscription, last sync time, daemon uptime.
 - **Advanced settings** (Nextcloud-style): bandwidth limit (`config set maxuploadrate`/`maxdownloadrate`), scan interval (`config set scaninterval`), realtime mode toggle (`scaninterval 0`), webhook status interval. Read current values via `config get` or `config list`.
 - **Account page**: new page or section — account email, subscription plan, usage breakdown, "Log ud" button (`jotta-cli logout` — DESTRUCTIVE, confirm), "Skift bruger" (logout + login), link to jottacloud.com account settings.
+  - **NO token login in GUI** (owner decision, 2026-06): `jotta-cli login` has no flags — it is 3 interactive TTY prompts (T&C, Personal Login Token, device name). GUI-spawned processes have no TTY, so login cannot be driven from the GUI. Instead: when status is `NeedsLogin`, show a dialog with a UriLauncher button to https://www.jottacloud.com/web/secure (Security tab), instructions to run `jotta-cli login` in a terminal, and a "Prøv igen" (retry) button that re-polls status. `JottaCommand` whitelist is NOT touched — login/logout never go through the GUI.
 - **Page consolidation**: consider merging Status + Account into one "Konto" page, or Status + Info. Evaluate after Transfers page is done. Current 5 pages (Status, Backup, Sync, Gendan, Indstillinger) may become 5-6 with Account/Info split or stay at 5 with consolidation.
 - **Tray icon color** (Nextcloud-style): symbolic black/white variant selectable in Indstillinger.
 
