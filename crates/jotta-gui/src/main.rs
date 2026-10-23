@@ -160,11 +160,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
-    sidebar.append(&nav_item("Status"));
-    sidebar.append(&nav_item("Backup"));
-    sidebar.append(&nav_item("Sync"));
-    sidebar.append(&nav_item("Gendan"));
-    sidebar.append(&nav_item("Indstillinger"));
+    sidebar.append(&nav_item("Status", "jotta-desktop-idle-symbolic"));
+    sidebar.append(&nav_item("Backup", "folder-symbolic"));
+    sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
+    sidebar.append(&nav_item("Gendan", "document-revert-symbolic"));
+    sidebar.append(&nav_item("Indstillinger", "emblem-system-symbolic"));
 
     let stack = gtk::Stack::new();
 
@@ -220,11 +220,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     sync_group.add(&sync_title_row);
     sync_group.add(&sync_path_row);
     sync_group.add(&sync_count_row);
-    // "Vælg mapper at synkronisere" — opens a checkbox dialog with top-level
-    // folders from the sync root. Matches the official Jottacloud app's
-    // "Choose folders to synchronize" from the Sync tab.
-    let sync_selective_btn = gtk::Button::with_label("Vælg mapper at synkronisere…");
+    // "Vælg mapper at synkronisere" — chevron-ikon for tydelighed (åbner dialog).
+    let sync_selective_btn = gtk::Button::from_icon_name("go-next-symbolic");
     sync_selective_btn.add_css_class("flat");
+    sync_selective_btn.set_tooltip_text(Some("Vælg mapper at synkronisere…"));
     let sync_selective_row = adw::ActionRow::builder()
         .title("Mappevalg")
         .subtitle("Vælg hvilke top-level mapper der skal synkroniseres")
@@ -237,7 +236,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // --- Gendan (restore/download) page ---
     // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
     // Trash is web-only (trash list has no --json, plain output is unparseable).
-    let restore_path_label = gtk::Label::new(Some("Backup / Archive / Sync"));
+    let restore_path_label = gtk::Label::new(Some("Jottacloud"));
     restore_path_label.set_halign(gtk::Align::Start);
     restore_path_label.add_css_class("dim-label");
     restore_path_label.set_wrap(true);
@@ -276,12 +275,13 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let restore_downloads_list = gtk::ListBox::new();
     restore_downloads_list.add_css_class("boxed-list");
     let restore_downloads_group = adw::PreferencesGroup::builder()
-        .title("Aktive downloads")
+        .title("Overførsler")
         .build();
 
     // Trash: web-only (trash list has no --json, plain output unparseable).
-    let restore_trash_web_btn = gtk::Button::with_label("Åbn papirkurv på web…");
+    let restore_trash_web_btn = gtk::Button::from_icon_name("go-next-symbolic");
     restore_trash_web_btn.add_css_class("flat");
+    restore_trash_web_btn.set_tooltip_text(Some("Åbn papirkurv på jottacloud.com…"));
     let restore_trash_row = adw::ActionRow::builder()
         .title("Papirkurv")
         .subtitle("Gendan eller slet filer permanent på jottacloud.com (åbner i browser)")
@@ -308,28 +308,32 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         stack,
         move |_, row| {
             if let Some(row) = row {
-                if let Some(child) = row.child() {
-                    if let Some(label) = child.downcast_ref::<gtk::Label>() {
-                        let title = label.text().to_string();
-                        let page = match title.as_str() {
-                            "Status" => Some("status"),
-                            "Backup" => Some("backup"),
-                            "Sync" => Some("sync"),
-                            "Gendan" => Some("restore"),
-                            "Indstillinger" => Some("settings"),
-                            _ => None,
-                        };
-                        if let Some(p) = page {
-                            stack.set_visible_child_name(p);
-                        }
-                    }
+                let idx = row.index();
+                let page = match idx {
+                    0 => Some("status"),
+                    1 => Some("backup"),
+                    2 => Some("sync"),
+                    3 => Some("restore"),
+                    4 => Some("settings"),
+                    _ => None,
+                };
+                if let Some(p) = page {
+                    stack.set_visible_child_name(p);
                 }
             }
         },
     ));
 
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    sidebar.set_margin_top(12);
+    // App-titel i toppen af sidebar for visuel balance.
+    let app_title = gtk::Label::new(None);
+    app_title.set_markup("<span size='large' weight='bold'>Jotta Desktop</span>");
+    app_title.set_halign(gtk::Align::Start);
+    app_title.set_margin_start(12);
+    app_title.set_margin_top(18);
+    app_title.set_margin_bottom(6);
+    sidebar_box.append(&app_title);
+    sidebar.set_margin_top(6);
     sidebar.set_margin_bottom(12);
     sidebar.set_margin_start(12);
     sidebar.set_margin_end(12);
@@ -359,6 +363,26 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // NavigationPage wrapper så split_view stadig virker.
     let content_page = adw::NavigationPage::new(&main_toolbar, "Status");
     split_view.set_content(Some(&content_page));
+
+    // Dynamisk topbar titel: opdater NavigationPage titel når aktiv fane skifter.
+    stack.connect_visible_child_notify(clone!(
+        #[weak]
+        content_page,
+        move |stack| {
+            let title = stack
+                .visible_child_name()
+                .and_then(|name| match name.as_str() {
+                    "status" => Some("Status"),
+                    "backup" => Some("Backup"),
+                    "sync" => Some("Sync"),
+                    "restore" => Some("Gendan"),
+                    "settings" => Some("Indstillinger"),
+                    _ => None,
+                })
+                .unwrap_or("Jotta Desktop");
+            content_page.set_title(title);
+        },
+    ));
 
     toast_overlay.set_child(Some(&split_view));
     window.set_content(Some(&toast_overlay));
@@ -1179,21 +1203,48 @@ fn rebuild_backup_list(
             .title(&b.name)
             .subtitle(&subtitle)
             .build();
-        // "Exclude" button per backup row — opens the backup-ignores dialog
-        // scoped to THIS backup (matches the official Jottacloud app's
-        // "Exclude" button per backup folder). NOT the same as sync selective.
-        let exclude_btn = gtk::Button::with_label("Udeluk…");
+
+        // "Udeluk…" — chevron-ikon for tydelighed (åbner dialog).
+        let exclude_btn = gtk::Button::from_icon_name("go-next-symbolic");
         exclude_btn.add_css_class("flat");
         exclude_btn.set_valign(gtk::Align::Center);
-        exclude_btn.set_tooltip_text(Some("Udeluk filer/mønstre fra denne backup"));
-        let backup_name = b.name.clone();
+        exclude_btn.set_tooltip_text(Some("Udeluk filer/mønstre fra denne backup…"));
+        let backup_name_ex = b.name.clone();
         let backup_path = b.path.clone();
-        let toast_tx = toast_tx.clone();
-        let window = window.clone();
+        let toast_tx_ex = toast_tx.clone();
+        let window_ex = window.clone();
         exclude_btn.connect_clicked(move |_| {
-            open_backup_ignores_dialog(&window, &backup_name, &backup_path, &toast_tx);
+            open_backup_ignores_dialog(&window_ex, &backup_name_ex, &backup_path, &toast_tx_ex);
         });
         row.add_suffix(&exclude_btn);
+
+        // "Fjern" — sletter backup-mappen (DESTRUKTIV — safety rule 3: altid bekræft).
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        remove_btn.set_tooltip_text(Some("Fjern denne backup-mappe"));
+        let backup_name = b.name.clone();
+        let toast_tx = toast_tx.clone();
+        let window = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(
+                Some(&format!("Fjern backup «{}»?", backup_name)),
+                Some("Backup-mappen fjernes fra Jottacloud-konfigurationen. Filerne på denne enhed påvirkes ikke, og de fjernes IKKE fra skyen — men de slettes ikke fra andre enheder heller. Vil du fortsætte?"),
+            );
+            dialog.add_response("cancel", "Annuller");
+            dialog.add_response("remove", "Fjern backup");
+            dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            let toast_tx = toast_tx.clone();
+            let backup_name = backup_name.clone();
+            dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |res| {
+                if res.as_str() == "remove" {
+                    run_cli(JottaCommand::BackupRemove(backup_name.clone()));
+                    let _ = toast_tx.send(format!("Backup «{}» fjernet", backup_name));
+                }
+            });
+        });
+        row.add_suffix(&remove_btn);
+
         list.append(&row);
     }
 }
@@ -1217,34 +1268,65 @@ fn build_status_page(
     usage_label: &gtk::Label,
     pause_switch: &gtk::Switch,
 ) -> gtk::Widget {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
 
-    let title = gtk::Label::new(None);
-    title.set_markup("<span size='xx-large' weight='bold'>Status</span>");
-    title.set_halign(gtk::Align::Start);
-    box_.append(&title);
+    // Konto & status i et struktureret kort (PreferencesGroup).
+    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
+    let account_group = adw::PreferencesGroup::builder()
+        .title("Konto")
+        .build();
+    let state_row = adw::ActionRow::builder()
+        .title("Status")
+        .build();
+    state_row.add_suffix(state_label);
+    state_label.set_halign(gtk::Align::End);
+    let email_row = adw::ActionRow::builder()
+        .title("E-mail")
+        .build();
+    email_row.add_suffix(email_label);
+    email_label.set_halign(gtk::Align::End);
+    email_label.add_css_class("dim-label");
+    account_group.add(&state_row);
+    account_group.add(&email_row);
+    box_.append(&account_group);
 
-    box_.append(state_label);
-    box_.append(email_label);
-
-    // Pause/resume row
-    let pause_group = adw::PreferencesGroup::new();
+    // Pause/resume: positiv formulering — ON = automatisk aktiv.
+    let pause_group = adw::PreferencesGroup::builder()
+        .title("Aktivitet")
+        .build();
     let pause_row = adw::ActionRow::builder()
-        .title("Pause backup og sync")
-        .subtitle("Stopper midlertidigt al aktivitet")
+        .title("Automatisk backup og sync")
+        .subtitle("Slå fra for midlertidigt at sætte al aktivitet på pause")
         .build();
     pause_row.add_suffix(pause_switch);
+    pause_row.set_activatable_widget(Some(pause_switch));
     pause_group.add(&pause_row);
     box_.append(&pause_group);
 
-    // Usage
-    let usage_title = gtk::Label::new(Some("Lagerplads"));
-    usage_title.set_halign(gtk::Align::Start);
-    usage_title.add_css_class("heading");
-    box_.append(&usage_title);
-    box_.append(usage_label);
-    box_.append(level);
+    // Lagerplads i egen indrammet gruppe.
+    let usage_group = adw::PreferencesGroup::builder()
+        .title("Lagerplads")
+        .build();
+    let usage_row = adw::ActionRow::builder()
+        .title("Forbrug")
+        .build();
+    usage_row.add_suffix(usage_label);
+    usage_label.set_halign(gtk::Align::End);
+    usage_label.add_css_class("dim-label");
+    usage_group.add(&usage_row);
+    // LevelBar skal fylde bredden — pak i en række uden suffix.
+    let level_row = adw::ActionRow::builder()
+        .title("")
+        .build();
+    level.set_hexpand(true);
+    level.set_margin_top(6);
+    level.set_margin_bottom(6);
+    level.set_margin_start(12);
+    level.set_margin_end(12);
+    level_row.add_suffix(level);
+    usage_group.add(&level_row);
+    box_.append(&usage_group);
 
     scrollable_page(&box_.upcast()).upcast()
 }
@@ -1253,12 +1335,9 @@ fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
 
-    let scrolled = gtk::ScrolledWindow::new();
-    scrolled.set_child(Some(list));
-    scrolled.set_vexpand(true);
-    scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
-    scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
-    box_.append(&scrolled);
+    // Ingen indre ScrolledWindow — listen ligger direkte i boksen.
+    // ydre scrollable_page håndterer overflow. Undgår dobbelt scroll.
+    box_.append(list);
 
     scrollable_page(&box_.upcast()).upcast()
 }
@@ -1276,8 +1355,20 @@ fn replace_add_button(page: &gtk::Widget, new_btn: &gtk::Button) {
     }
 }
 
-fn nav_item(label: &str) -> gtk::Widget {
-    gtk::Label::new(Some(label)).upcast()
+fn nav_item(label: &str, icon_name: &str) -> gtk::Widget {
+    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row_box.set_margin_start(6);
+    row_box.set_margin_end(6);
+    row_box.set_margin_top(6);
+    row_box.set_margin_bottom(6);
+    let icon = gtk::Image::from_icon_name(icon_name);
+    icon.set_icon_size(gtk::IconSize::Normal);
+    let lbl = gtk::Label::new(Some(label));
+    lbl.set_halign(gtk::Align::Start);
+    lbl.set_hexpand(true);
+    row_box.append(&icon);
+    row_box.append(&lbl);
+    row_box.upcast()
 }
 
 /// Byg Indstillinger-siden med minimize-to-tray switch.
@@ -1926,10 +2017,7 @@ fn build_restore_page(
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
 
-    let title = gtk::Label::new(None);
-    title.set_markup("<span size='xx-large' weight='bold'>Gendan</span>");
-    title.set_halign(gtk::Align::Start);
-    box_.append(&title);
+    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
 
     // Remote browser section
     let browser_title = gtk::Label::new(Some("Fjernfiler"));
@@ -1943,7 +2031,7 @@ fn build_restore_page(
     box_.append(download_group);
 
     // Downloads section
-    let downloads_title = gtk::Label::new(Some("Downloads"));
+    let downloads_title = gtk::Label::new(Some("Overførsler"));
     downloads_title.set_halign(gtk::Align::Start);
     downloads_title.add_css_class("heading");
     downloads_group.add(downloads_list);
@@ -2099,8 +2187,8 @@ fn rebuild_downloads_list(
     }
     if entries.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen aktive downloads")
-            .subtitle("Downloads vises her mens de kører eller ved fejl")
+            .title("Ingen overførsler")
+            .subtitle("Downloads og uploads vises her")
             .build();
         list.append(&row);
         return;
@@ -2111,9 +2199,15 @@ fn rebuild_downloads_list(
             jotta_core::remote::DownloadStatus::Failed => "Fejlet",
             jotta_core::remote::DownloadStatus::Completed => "Færdig",
         };
+        // Kun filnavn i titel, fulde stier i undertitel.
+        let file_name = entry
+            .remote_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&entry.remote_path);
         let subtitle = format!("{} → {}", entry.remote_path, entry.local_dest);
         let row = adw::ActionRow::builder()
-            .title(&format!("{} ({})", entry.remote_path, status_text))
+            .title(&format!("{} ({})", file_name, status_text))
             .subtitle(&subtitle)
             .build();
 
