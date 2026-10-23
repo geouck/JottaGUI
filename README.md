@@ -70,7 +70,7 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 7 complete (PR #11 merged)
+## Status: iteration 8 complete (PR #12 merged)
 
 - [x] Workspace + core (28 unit tests green, zero dependencies)
 - [x] Tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (always visible),
@@ -105,33 +105,34 @@ The tray icon switches between 5 named icons based on daemon status:
       `list uploads --json` + `list downloads --json`; errors derived from
       entries via `collect_transfer_errors()`. Error dedup (one toast per
       unique error). Compact headerbar/windowcontrols via CSS (PRIORITY_USER+1)
+- [x] Settings/robustness (iteration 8, PR #12): "Start ved login" toggle
+      (XDG autostart), daemon-not-responding banner on Status page,
+      Info page (device, email, subscription, Jottacloud version,
+      Jotta Desktop version). Tray stays alive when jottad stops.
 
-### Next: iteration 8 — Settings/robustness (branch `vibe/iteration8-settings-robustness`)
-
-- [ ] **Launch on system startup** toggle (XDG autostart for `jotta-desktop`)
-- [ ] **Daemon-not-responding** state banner ("restart jottad via systemctl --user restart jottad")
-- [ ] **Info page**: device info, jottad/jotta-cli version, subscription, daemon uptime
-- [ ] **Error notifications**: desktop notifications + persistent list in GUI
-      (from `list downloaderrors`, `list uploaderrors`, `sync log`)
-- [ ] **Advanced settings** (Nextcloud-style): bandwidth limit, scan interval,
-      realtime mode, webhook interval (`config set`/`config get`)
-- [ ] **Account page**: subscription plan, usage breakdown, "Log ud" (confirm),
-      link to jottacloud.com account settings
-- [ ] **Page consolidation**: evaluate merging Status+Account or Status+Info
-- [ ] Snapshot/restore points
-
-### Later: iteration 9 — Flatpak
+### Next: iteration 9 — Flatpak (branch `vibe/iteration9-flatpak`)
 
 - [ ] Pin jotta-cli version + sha256, get Jottacloud permission to bundle
 - [ ] Flathub submission + AppStream metadata finalization
 
+### Later: iteration 10 — i18n
+
+- [ ] Detect user language (LC_MESSAGES / LANG)
+- [ ] Support: Norwegian (nb/nn), Swedish (sv), Danish (da), German (de), English (en)
+- [ ] Translation catalog (gettext .po or Rust fluent/tr! macro)
+- [ ] jotta-core stays zero-dependency — i18n in jotta-gui + jotta-tray only
+
 ### Even later
 
-- [ ] i18n (da/en)
 - [ ] COPR + AUR packaging
+- [ ] Advanced settings (bandwidth limit, scan interval, realtime mode)
+- [ ] Account page (subscription, usage breakdown, "Log ud")
+- [ ] Page consolidation (Status+Account, Status+Info)
 - [ ] Tray icon color (black/white, Nextcloud-style)
 - [ ] "Gendan gammel version" UI (revisions parsed, no UI yet)
 - [ ] KSNI menu enhancements (device list, activity)
+- [ ] Snapshot/restore points
+- [ ] Desktop notifications for errors
 
 ## License
 MPL-2.0
