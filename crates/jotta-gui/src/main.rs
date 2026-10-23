@@ -276,6 +276,29 @@ fn build_ui(app: &adw::Application) {
     split_view.set_sidebar(Some(&sidebar_page));
     split_view.set_content(Some(&content_page));
 
+    // FEATURE: Sider skal kunne scrolles når indholdet overflower.
+    // Vi wrapper hver side i en ScrolledWindow inde i stack.
+    let stack = &stack;
+    let stack_scrolled = gtk::ScrolledWindow::new();
+    stack_scrolled.set_child(Some(stack));
+    stack_scrolled.set_vexpand(true);
+    stack_scrolled.set_hscrollbar_policy(gtk::PolicyType::Never);
+    stack_scrolled.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+
+    // FEATURE: Hovedvindue med HeaderBar (minimer/maximer/luk knapper).
+    // ToolbarView + HeaderBar giver standard window controls.
+    let main_toolbar = adw::ToolbarView::new();
+    let main_header = adw::HeaderBar::new();
+    // Vis standard window title buttons (minimer, maksimer, luk).
+    main_header.set_show_start_title_buttons(true);
+    main_header.set_show_end_title_buttons(true);
+    main_toolbar.add_top_bar(&main_header);
+    main_toolbar.set_content(Some(&stack_scrolled));
+
+    // NavigationPage wrapper så split_view stadig virker.
+    let content_page = adw::NavigationPage::new(&main_toolbar, "Status");
+    split_view.set_content(Some(&content_page));
+
     toast_overlay.set_child(Some(&split_view));
     window.set_content(Some(&toast_overlay));
 
@@ -1267,9 +1290,12 @@ fn build_sync_selective_dialog(
     scrolled.set_min_content_height(200);
     content.append(&scrolled);
 
-    // ToolbarView with header bar: Cancel (start) + Apply (end).
+    // ToolbarView with header bar: Cancel (start) + Apply (end) + window controls.
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
+    // FEATURE: Dialog skal kunne lukkes og flyttes — vis window controls.
+    header.set_show_start_title_buttons(true);
+    header.set_show_end_title_buttons(true);
 
     let dialog_cancel = dialog.clone();
     let cancel_btn = gtk::Button::with_label("Annuller");
@@ -1300,14 +1326,46 @@ fn build_sync_selective_dialog(
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
                 let mut errors = Vec::new();
+                // FIX: sync selective kræver at sync kører. Hvis add/rem fejler
+                // med "syncapp not...", prøv at starte sync først og retry én gang.
+                let mut needs_sync_start = false;
                 for name in &to_add {
-                    if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
-                        errors.push(format!("{name}: {e}"));
+                    match client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            if msg.contains("syncapp") || msg.contains("not running") || msg.contains("not enabled") {
+                                needs_sync_start = true;
+                            }
+                            errors.push(format!("{name}: {e}"));
+                        }
                     }
                 }
                 for name in &to_remove {
-                    if let Err(e) = client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
-                        errors.push(format!("{name}: {e}"));
+                    match client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let msg = format!("{e}");
+                            if msg.contains("syncapp") || msg.contains("not running") || msg.contains("not enabled") {
+                                needs_sync_start = true;
+                            }
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                }
+                // Retry én gang efter sync start hvis nødvendigt.
+                if needs_sync_start && !errors.is_empty() {
+                    let _ = client.run(&JottaCommand::SyncStart);
+                    errors.clear();
+                    for name in &to_add {
+                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveAdd(name.clone())) {
+                            errors.push(format!("{name}: {e}"));
+                        }
+                    }
+                    for name in &to_remove {
+                        if let Err(e) = client.run(&JottaCommand::SyncSelectiveRemove(name.clone())) {
+                            errors.push(format!("{name}: {e}"));
+                        }
                     }
                 }
                 let msg = if errors.is_empty() {
@@ -1499,7 +1557,14 @@ fn open_backup_ignores_dialog(
                         match client.run(&JottaCommand::IgnoreAdd { pattern: pattern.clone(), backup: backup.clone() }) {
                             Ok(_) => {
                                 let _ = toast_tx.send(format!("Mønster tilføjet: {pattern}"));
-                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: Some(backup_name.clone()) }) {
+                                // FIX: Refresh skal følge samme scope som add.
+                                // "Denne backup" → Some(name), "Alle backups" → None.
+                                let refresh_scope = if backup.is_some() {
+                                    Some(backup_name.clone())
+                                } else {
+                                    None
+                                };
+                                if let Ok(v) = client.run_json(&JottaCommand::IgnoresList { backup: refresh_scope }) {
                                     let patterns = parse_ignores(&v);
                                     let _ = refresh_tx.send(patterns);
                                 }
@@ -1515,9 +1580,12 @@ fn open_backup_ignores_dialog(
         entry.set_text("");
     });
 
-    // ToolbarView with header bar: Luk button.
+    // ToolbarView with header bar: Luk button + window controls.
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
+    // FEATURE: Dialog skal kunne lukkes og flyttes — vis window controls.
+    header.set_show_start_title_buttons(true);
+    header.set_show_end_title_buttons(true);
     let dialog_close = dialog.clone();
     let close_btn = gtk::Button::with_label("Luk");
     close_btn.connect_clicked(move |_| {
