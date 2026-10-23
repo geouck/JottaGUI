@@ -87,6 +87,11 @@ The tray icon switches between 5 named icons based on daemon status:
       trash web-only (no list UI — `trash list` has no `--json`)
 - [x] All remote-browsing uses `ls --json` with case-tolerant parsers
       (real fixtures: Size optional, casing inconsistent Folders/revisions)
+- [x] UI polish (iteration 6o): dynamic topbar title, sidebar with symbolic icons +
+      app title, no H1 headings in pages, PreferencesGroup layout, positive switch
+      labels, chevron icons on dialog rows, "Fjern" button per backup row with
+      AlertDialog, "Overførsler" section, filename-only download titles,
+      no double-scroll on backup page
 - [ ] Transfers page: `list uploads --json` + `list downloaderrors` + `list uploaderrors`
       + live feed (iteration 7)
 - [ ] Settings/robustness: migration to adw::Dialog, error toasts, snapshot (iteration 8)

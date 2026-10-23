@@ -26,6 +26,20 @@ official GUI apps for Windows/macOS; on Linux there is only the CLI.
 - `--json` output exists for status; the schema is NOT formally documented - hence the tolerant parser in jotta-core.
 - RPM repo: `https://repo.jotta.cloud/redhat` (gpgkey `https://repo.jotta.cloud/jotta.gpg`, binary format - import via `gpg --enarmor` or let dnf import it from the repo file's gpgkey directive).
 
+## UI/UX design guidelines (GNOME/libadwaita HIG, cross-DE)
+
+Established during iteration 6o (UI polish, Gemini Argon review):
+- **Topbar**: dynamic title — `NavigationPage::set_title()` updates on `stack.connect_visible_child_notify`. Never hardcode a page name in the headerbar.
+- **No H1 headings in page content**: the topbar shows the page name. Page content starts directly with `adw::PreferencesGroup` or a `gtk::Box`.
+- **Sidebar**: `gtk::ListBox` with `navigation-sidebar` CSS class. Each item = `gtk::Box` (horizontal) with `gtk::Image` (symbolic icon, freedesktop names) + `gtk::Label` (left-aligned, hexpand). App title label at the top of the sidebar box.
+- **Page content**: all content in `adw::PreferencesGroup` (titled groups) or `boxed-list` ListBoxes. Use `set_margin_all(widget, 24)` helper for page padding.
+- **Action buttons**: dialog-opening rows use `go-next-symbolic` chevron icon (flat button) as suffix on `adw::ActionRow`. Destructive actions use `user-trash-symbolic` icon with `adw::AlertDialog` confirmation (safety rule 3).
+- **Switches**: positive formulation (ON = active/desired state). `adw::ActionRow::set_activatable_widget(Some(&switch))` so clicking the row toggles the switch.
+- **Scrolling**: each page wrapped in `scrollable_page()` helper (outer ScrolledWindow). NO inner ScrolledWindow inside a page — causes double scrollbars and vexpand issues.
+- **Status page**: account info (state, email) in a "Konto" PreferencesGroup with values as right-aligned suffix labels. Usage in a "Lagerplads" group with LevelBar.
+- **Remote browser**: root path label shows "Jottacloud" (not "Backup / Archive / Sync"). Downloads section titled "Overførsler". Download entries show filename only in title, full paths in subtitle.
+- **Cross-DE icons**: use freedesktop standard symbolic icon names (`folder-symbolic`, `folder-sync-symbolic`, `document-revert-symbolic`, `emblem-system-symbolic`, `go-next-symbolic`, `go-up-symbolic`, `view-refresh-symbolic`, `user-trash-symbolic`, `process-stop-symbolic`). These exist in all major icon themes (Adwaita, Breeze, Cosmic).
+
 ## Hard safety rules (encode in the GUI)
 
 1. NEVER move the sync folder manually; jotta-cli mirrors a move as a mass delete. Only `sync move`.
