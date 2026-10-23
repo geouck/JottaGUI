@@ -109,21 +109,29 @@ pub enum JottaCommand {
     DownloadAbort(String),
     /// `download --retry=<downloadid>` — retry failed files in a download.
     DownloadRetry(String),
-    /// `list downloads` — list ongoing and failed downloads (not JSON by default).
+    /// `list downloads --json` — list ongoing/failed downloads as JSON.
+    /// Verified: `jotta-cli list downloads --help` shows `--json` flag.
     ListDownloads,
     /// `list downloadinfo --downloadid=<id> [--json]` — error details for a
     /// failed download. JSON when `json` is true.
+    /// NOTE: newer jotta-cli renamed this to `list downloaderrors`
+    /// (verified in `jotta-cli download --help` output). Both work.
     ListDownloadInfo { download_id: String, json: bool },
-    /// `ls <remote_path>` — browse remote filesystem (Sync/Backup/Archive).
-    /// Returns a listing (not JSON by default).
+    /// `ls <remote_path> --json` — browse remote filesystem (Sync/Backup/Archive)
+    /// as JSON. Verified schemas:
+    /// - Folder: `{"Folders": [{"Name","Path","Modified","Size"?}]}` (Size optional)
+    /// - File:   `{"revisions": [{"id","size","checksum","createdAtMillis","modifiedAtMillis"}]}`
+    /// Casing is inconsistent in jotta-cli — parser must be case-tolerant.
     LsRemote(String),
-    /// `trash ls` — list items in the remote trash.
-    TrashList,
     /// `trash restore <path>` — restore an item from trash to its original
     /// location. NOT destructive (reverses a delete).
+    /// NOTE: `trash list` has NO --json flag and its plain output is unparseable
+    /// (single space-separated line). Trash UI is web-only for now.
     TrashRestore(String),
     /// `trash purge <path>` — permanently delete an item from trash.
     /// DESTRUCTIVE — always confirm in the UI (safety rule 3).
+    /// WARNING: `trash purge` WITHOUT a path empties the ENTIRE trash.
+    /// The GUI must always pass an explicit path + show a confirmation dialog.
     TrashPurge(String),
 }
 
@@ -219,7 +227,7 @@ impl JottaCommand {
                 push(&mut args, &["download"]);
                 args.push(format!("--retry={id}"));
             }
-            JottaCommand::ListDownloads => push(&mut args, &["list", "downloads"]),
+            JottaCommand::ListDownloads => push(&mut args, &["list", "downloads", "--json"]),
             JottaCommand::ListDownloadInfo { download_id, json } => {
                 push(&mut args, &["list", "downloadinfo"]);
                 args.push(format!("--downloadid={download_id}"));
@@ -230,8 +238,8 @@ impl JottaCommand {
             JottaCommand::LsRemote(path) => {
                 push(&mut args, &["ls"]);
                 args.push(path.clone());
+                push(&mut args, &["--json"]);
             }
-            JottaCommand::TrashList => push(&mut args, &["trash", "ls"]),
             JottaCommand::TrashRestore(path) => {
                 push(&mut args, &["trash", "restore"]);
                 args.push(path.clone());
@@ -252,6 +260,8 @@ impl JottaCommand {
                 | JottaCommand::IgnoresList { .. }
                 | JottaCommand::SyncSelectiveList
                 | JottaCommand::ListDownloadInfo { json: true, .. }
+                | JottaCommand::ListDownloads
+                | JottaCommand::LsRemote(_)
         )
     }
 }
@@ -405,10 +415,10 @@ mod tests {
             JottaCommand::DownloadRetry("abc123".into()).argv(),
             vec!["download", "--retry=abc123"]
         );
-        // List downloads / downloadinfo.
+        // List downloads --json (verified: `jotta-cli list downloads --help` shows --json).
         assert_eq!(
             JottaCommand::ListDownloads.argv(),
-            vec!["list", "downloads"]
+            vec!["list", "downloads", "--json"]
         );
         assert_eq!(
             JottaCommand::ListDownloadInfo { download_id: "d1".into(), json: true }.argv(),
@@ -418,13 +428,13 @@ mod tests {
             JottaCommand::ListDownloadInfo { download_id: "d1".into(), json: false }.argv(),
             vec!["list", "downloadinfo", "--downloadid=d1"]
         );
-        // Remote ls: browse remote filesystem.
+        // Remote ls --json (verified schema: {"Folders":[...]} or {"revisions":[...]}).
         assert_eq!(
             JottaCommand::LsRemote("Backup/Laptop".into()).argv(),
-            vec!["ls", "Backup/Laptop"]
+            vec!["ls", "Backup/Laptop", "--json"]
         );
-        // Trash: ls, restore (non-destructive), purge (DESTRUCTIVE).
-        assert_eq!(JottaCommand::TrashList.argv(), vec!["trash", "ls"]);
+        // Trash: restore (non-destructive), purge (DESTRUCTIVE — always pass path).
+        // NOTE: TrashList removed — `trash list` has no --json and plain output is unparseable.
         assert_eq!(
             JottaCommand::TrashRestore("Backup/Laptop/file.txt".into()).argv(),
             vec!["trash", "restore", "Backup/Laptop/file.txt"]
@@ -446,14 +456,16 @@ mod tests {
         // ListDownloadInfo is JSON only when json=true.
         assert!(JottaCommand::ListDownloadInfo { download_id: "x".into(), json: true }.is_json());
         assert!(!JottaCommand::ListDownloadInfo { download_id: "x".into(), json: false }.is_json());
-        // Download/trash/ls are NOT JSON by default.
+        // Download is NOT JSON. LsRemote and ListDownloads ARE JSON (always --json).
         assert!(!JottaCommand::Download {
             remote_path: "Backup/X".into(),
             local_dest: PathBuf::from("/tmp"),
             merge: false,
         }.is_json());
-        assert!(!JottaCommand::TrashList.is_json());
-        assert!(!JottaCommand::LsRemote("Backup".into()).is_json());
-        assert!(!JottaCommand::ListDownloads.is_json());
+        assert!(JottaCommand::LsRemote("Backup".into()).is_json());
+        assert!(JottaCommand::ListDownloads.is_json());
+        // Trash restore/purge are never JSON.
+        assert!(!JottaCommand::TrashRestore("x".into()).is_json());
+        assert!(!JottaCommand::TrashPurge("x".into()).is_json());
     }
 }

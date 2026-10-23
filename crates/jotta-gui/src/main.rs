@@ -169,7 +169,8 @@ fn build_ui(app: &adw::Application) {
     stack.add_titled(&sync_page, Some("sync"), "Sync");
 
     // --- Gendan (restore/download) page ---
-    // Remote browser for Backup/Archive/Sync + download dialog + downloads list + trash.
+    // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
+    // Trash is web-only (trash list has no --json, plain output is unparseable).
     let restore_path_label = gtk::Label::new(Some("Backup / Archive / Sync"));
     restore_path_label.set_halign(gtk::Align::Start);
     restore_path_label.add_css_class("dim-label");
@@ -210,14 +211,16 @@ fn build_ui(app: &adw::Application) {
         .title("Aktive downloads")
         .build();
 
-    let restore_trash_list = gtk::ListBox::new();
-    restore_trash_list.add_css_class("boxed-list");
-    let restore_trash_refresh_btn = gtk::Button::with_label("Genindlæs");
-    restore_trash_refresh_btn.add_css_class("flat");
-    let restore_trash_group = adw::PreferencesGroup::builder()
-        .title("Papirkurv (fjernbet)")
-        .description("Filer i papirkurven slettes permanent efter 30 dage. Gendan = tilbage til original placering. Tøm = permanent sletning.")
+    // Trash: web-only (trash list has no --json, plain output unparseable).
+    let restore_trash_web_btn = gtk::Button::with_label("Åbn papirkurv på web…");
+    restore_trash_web_btn.add_css_class("flat");
+    let restore_trash_row = adw::ActionRow::builder()
+        .title("Papirkurv")
+        .subtitle("Gendan eller slet filer permanent på jottacloud.com (åbner i browser)")
         .build();
+    restore_trash_row.add_suffix(&restore_trash_web_btn);
+    let restore_trash_group = adw::PreferencesGroup::new();
+    restore_trash_group.add(&restore_trash_row);
 
     let restore_page = build_restore_page(
         &restore_path_box,
@@ -226,7 +229,6 @@ fn build_ui(app: &adw::Application) {
         &restore_downloads_group,
         &restore_downloads_list,
         &restore_trash_group,
-        &restore_trash_list,
     );
     stack.add_titled(&restore_page, Some("restore"), "Gendan");
 
@@ -375,46 +377,25 @@ fn build_ui(app: &adw::Application) {
     // Selected entry in the remote list (main thread only).
     let restore_selected = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
 
-    // Initial load: list root (Backup, Archive, Sync as top-level entries).
-    // Worker thread owns only plain data; results go back via mpsc channel
-    // + idle_add_local on the main thread (same pattern as the 3s poller).
+    // Initial load: show static root (Backup / Archive / Sync).
+    // No worker thread needed — this is static data applied directly.
     {
-        let restore_list = restore_list.clone();
-        let restore_path_label = restore_path_label.clone();
-        let selected = restore_selected.clone();
-        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
-        let data_rx = Arc::new(Mutex::new(data_rx));
-        glib::idle_add_local(move || {
-            let rx = data_rx.lock().unwrap();
-            match rx.try_recv() {
-                Ok(entries) => {
-                    restore_path_label.set_text("Backup / Archive / Sync");
-                    rebuild_remote_list(&restore_list, &entries, &selected);
-                    glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-            }
-        });
-        std::thread::spawn(move || {
-            if let Some(loc) = BinaryLocator::from_path() {
-                let client = CliClient::new(loc);
-                let text = client
-                    .run_text(&JottaCommand::LsRemote(String::new()))
-                    .unwrap_or_default();
-                let entries = jotta_core::remote::parse_ls(&text);
-                let entries = if entries.is_empty() {
-                    vec![
-                        jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
-                        jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
-                        jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
-                    ]
-                } else {
-                    entries
-                };
-                let _ = data_tx.send(entries);
-            }
-        });
+        let entries = [
+            ("Backup", "Enheder med backup"),
+            ("Archive", "Arkiverede filer"),
+            ("Sync", "Synkroniseret mappe"),
+        ];
+        for (name, desc) in entries {
+            let row = adw::ActionRow::builder()
+                .title(name)
+                .subtitle(&format!("Mappe — {desc}"))
+                .build();
+            let img = gtk::Image::from_icon_name("folder-symbolic");
+            row.add_prefix(&img);
+            row.set_activatable(true);
+            restore_list.append(&row);
+        }
+        restore_path_label.set_text("Backup / Archive / Sync");
     }
 
     // Row selected in remote list -> update selection (main thread only).
@@ -433,8 +414,9 @@ fn build_ui(app: &adw::Application) {
         },
     ));
 
-    // Double-click / activate row -> navigate into directory.
-    // Worker thread fetches listing; result via mpsc + idle_add_local.
+    // Double-click / activate row -> navigate into directory or show file revisions.
+    // Worker thread fetches JSON listing; result via mpsc + idle_add_local.
+    // Channel carries LsResult (plain data: Folders / Revisions / Empty + error string).
     restore_list.connect_row_activated(clone!(
         #[strong]
         restore_current_path,
@@ -447,7 +429,13 @@ fn build_ui(app: &adw::Application) {
         move |_, row| {
             if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
                 let name = action_row.title().to_string();
-                let is_dir = action_row.subtitle().map(|s| s.starts_with("Mappe")).unwrap_or(false);
+                let subtitle = action_row.subtitle().unwrap_or_default();
+                let is_dir = subtitle.starts_with("Mappe");
+                // Ghost device: subtitle starts with "Offline enhed" — not navigable.
+                let is_ghost = subtitle.starts_with("Offline enhed");
+                if is_ghost {
+                    return; // graceful: no navigation into dead devices
+                }
                 if is_dir {
                     let new_path = if restore_current_path.borrow().is_empty() {
                         name.clone()
@@ -458,15 +446,15 @@ fn build_ui(app: &adw::Application) {
                     restore_path_label.set_text(&new_path);
                     *restore_selected.borrow_mut() = String::new();
 
-                    let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+                    let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
                     let data_rx = Arc::new(Mutex::new(data_rx));
                     let list = restore_list.clone();
                     let sel = restore_selected.clone();
                     glib::idle_add_local(move || {
                         let rx = data_rx.lock().unwrap();
                         match rx.try_recv() {
-                            Ok(entries) => {
-                                rebuild_remote_list(&list, &entries, &sel);
+                            Ok(result) => {
+                                rebuild_remote_list_result(&list, &result, &sel);
                                 glib::ControlFlow::Break
                             }
                             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -478,13 +466,49 @@ fn build_ui(app: &adw::Application) {
                     std::thread::spawn(move || {
                         if let Some(loc) = BinaryLocator::from_path() {
                             let client = CliClient::new(loc);
-                            let text = client
-                                .run_text(&JottaCommand::LsRemote(path))
-                                .unwrap_or_default();
-                            let entries = jotta_core::remote::parse_ls(&text);
-                            let _ = data_tx.send(entries);
+                            let result = match client.run_json(&JottaCommand::LsRemote(path)) {
+                                Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                                Err(e) => LsNavResult::Error(format!("{e}")),
+                            };
+                            let _ = data_tx.send(result);
                         }
                     });
+                } else {
+                    // File: fetch revisions (for future "gendan gammel version" feature).
+                    let file_path = if restore_current_path.borrow().is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}/{}", restore_current_path.borrow(), name)
+                    };
+                    let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
+                    let data_rx = Arc::new(Mutex::new(data_rx));
+                    let list = restore_list.clone();
+                    let sel = restore_selected.clone();
+                    let path_label = restore_path_label.clone();
+                    glib::idle_add_local(move || {
+                        let rx = data_rx.lock().unwrap();
+                        match rx.try_recv() {
+                            Ok(result) => {
+                                rebuild_remote_list_result(&list, &result, &sel);
+                                // Show path in label so user sees where revisions are.
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+                    let path = file_path.clone();
+                    std::thread::spawn(move || {
+                        if let Some(loc) = BinaryLocator::from_path() {
+                            let client = CliClient::new(loc);
+                            let result = match client.run_json(&JottaCommand::LsRemote(path)) {
+                                Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                                Err(e) => LsNavResult::Error(format!("{e}")),
+                            };
+                            let _ = data_tx.send(result);
+                        }
+                    });
+                    let _ = path_label;
                 }
             }
         },
@@ -513,15 +537,15 @@ fn build_ui(app: &adw::Application) {
             }
             *sel.borrow_mut() = String::new();
 
-            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
             let data_rx = Arc::new(Mutex::new(data_rx));
             let list_r = list.clone();
             let sel_r = sel.clone();
             glib::idle_add_local(move || {
                 let rx = data_rx.lock().unwrap();
                 match rx.try_recv() {
-                    Ok(entries) => {
-                        rebuild_remote_list(&list_r, &entries, &sel_r);
+                    Ok(result) => {
+                        rebuild_remote_list_result(&list_r, &result, &sel_r);
                         glib::ControlFlow::Break
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -533,20 +557,16 @@ fn build_ui(app: &adw::Application) {
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
-                    let text = client
-                        .run_text(&JottaCommand::LsRemote(path.clone()))
-                        .unwrap_or_default();
-                    let entries = jotta_core::remote::parse_ls(&text);
-                    let entries = if entries.is_empty() && path.is_empty() {
-                        vec![
-                            jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
-                            jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
-                            jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
-                        ]
+                    let result = if path.is_empty() {
+                        // Root: static entries.
+                        LsNavResult::Root
                     } else {
-                        entries
+                        match client.run_json(&JottaCommand::LsRemote(path)) {
+                            Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                            Err(e) => LsNavResult::Error(format!("{e}")),
+                        }
                     };
-                    let _ = data_tx.send(entries);
+                    let _ = data_tx.send(result);
                 }
             });
         });
@@ -560,15 +580,15 @@ fn build_ui(app: &adw::Application) {
         restore_refresh_btn.connect_clicked(move |_| {
             let path = current_path.borrow().clone();
 
-            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::RemoteEntry>>();
+            let (data_tx, data_rx) = std::sync::mpsc::channel::<LsNavResult>();
             let data_rx = Arc::new(Mutex::new(data_rx));
             let list_r = list.clone();
             let sel_r = sel.clone();
             glib::idle_add_local(move || {
                 let rx = data_rx.lock().unwrap();
                 match rx.try_recv() {
-                    Ok(entries) => {
-                        rebuild_remote_list(&list_r, &entries, &sel_r);
+                    Ok(result) => {
+                        rebuild_remote_list_result(&list_r, &result, &sel_r);
                         glib::ControlFlow::Break
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -580,20 +600,15 @@ fn build_ui(app: &adw::Application) {
             std::thread::spawn(move || {
                 if let Some(loc) = BinaryLocator::from_path() {
                     let client = CliClient::new(loc);
-                    let text = client
-                        .run_text(&JottaCommand::LsRemote(path.clone()))
-                        .unwrap_or_default();
-                    let entries = jotta_core::remote::parse_ls(&text);
-                    let entries = if entries.is_empty() && path.is_empty() {
-                        vec![
-                            jotta_core::remote::RemoteEntry { name: "Backup".into(), is_dir: true, size: None },
-                            jotta_core::remote::RemoteEntry { name: "Archive".into(), is_dir: true, size: None },
-                            jotta_core::remote::RemoteEntry { name: "Sync".into(), is_dir: true, size: None },
-                        ]
+                    let result = if path.is_empty() {
+                        LsNavResult::Root
                     } else {
-                        entries
+                        match client.run_json(&JottaCommand::LsRemote(path)) {
+                            Ok(v) => LsNavResult::from(jotta_core::remote::parse_ls_json(&v)),
+                            Err(e) => LsNavResult::Error(format!("{e}")),
+                        }
                     };
-                    let _ = data_tx.send(entries);
+                    let _ = data_tx.send(result);
                 }
             });
         });
@@ -675,70 +690,21 @@ fn build_ui(app: &adw::Application) {
         std::thread::spawn(move || {
             if let Some(loc) = BinaryLocator::from_path() {
                 let client = CliClient::new(loc);
-                if let Ok(text) = client.run_text(&JottaCommand::ListDownloads) {
-                    let entries = jotta_core::remote::parse_downloads(&text);
+                if let Ok(v) = client.run_json(&JottaCommand::ListDownloads) {
+                    let entries = jotta_core::remote::parse_downloads_json(&v);
                     let _ = data_tx.send(entries);
                 }
             }
         });
     }
 
-    // Trash: load on startup (same pattern).
-    {
-        let list = restore_trash_list.clone();
-        let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
-        let data_rx = Arc::new(Mutex::new(data_rx));
-        glib::idle_add_local(move || {
-            let rx = data_rx.lock().unwrap();
-            match rx.try_recv() {
-                Ok(entries) => {
-                    rebuild_trash_list(&list, &entries);
-                    glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-            }
-        });
-        std::thread::spawn(move || {
-            if let Some(loc) = BinaryLocator::from_path() {
-                let client = CliClient::new(loc);
-                if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
-                    let entries = jotta_core::remote::parse_trash(&text);
-                    let _ = data_tx.send(entries);
-                }
-            }
-        });
-    }
-
-    // Trash refresh button.
-    {
-        let list = restore_trash_list.clone();
-        restore_trash_refresh_btn.connect_clicked(move |_| {
-            let (data_tx, data_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
-            let data_rx = Arc::new(Mutex::new(data_rx));
-            let list_r = list.clone();
-            glib::idle_add_local(move || {
-                let rx = data_rx.lock().unwrap();
-                match rx.try_recv() {
-                    Ok(entries) => {
-                        rebuild_trash_list(&list_r, &entries);
-                        glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-                }
-            });
-            std::thread::spawn(move || {
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
-                        let entries = jotta_core::remote::parse_trash(&text);
-                        let _ = data_tx.send(entries);
-                    }
-                }
-            });
-        });
-    }
+    // Trash: web-only button — opens jottacloud.com trash in browser.
+    // `trash list` has no --json and plain output is unparseable (single
+    // space-separated line with filenames containing spaces).
+    restore_trash_web_btn.connect_clicked(move |_| {
+        // gtk::show_uri returns () in gtk4-rs 0.9 (not Result).
+        gtk::show_uri(None::<&gtk::Window>, "https://www.jottacloud.com/web/trash", 0);
+    });
 
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
@@ -1552,7 +1518,6 @@ fn build_restore_page(
     downloads_group: &adw::PreferencesGroup,
     downloads_list: &gtk::ListBox,
     trash_group: &adw::PreferencesGroup,
-    trash_list: &gtk::ListBox,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
@@ -1580,62 +1545,142 @@ fn build_restore_page(
     downloads_group.add(downloads_list);
     box_.append(downloads_group);
 
-    // Trash section
+    // Trash section (web-only — no list UI).
     let trash_title = gtk::Label::new(Some("Papirkurv"));
     trash_title.set_halign(gtk::Align::Start);
     trash_title.add_css_class("heading");
     box_.append(&trash_title);
     box_.append(trash_group);
-    let trash_scrolled = gtk::ScrolledWindow::new();
-    trash_scrolled.set_child(Some(trash_list));
-    trash_scrolled.set_max_content_height(200);
-    trash_scrolled.set_propagate_natural_height(true);
-    box_.append(&trash_scrolled);
 
     box_.upcast()
 }
 
-/// Rebuild the remote file list. Each row is an ActionRow with the entry name
-/// as title. Directories show "Mappe" as subtitle; files show size.
-fn rebuild_remote_list(
+/// Navigation result from a worker thread: plain data only.
+/// Carries the parsed `ls --json` result, the static root entries,
+/// or an error string (e.g. ghost device "Cannot find device").
+enum LsNavResult {
+    Folders(Vec<jotta_core::remote::RemoteEntry>),
+    Revisions(Vec<jotta_core::remote::FileRevision>),
+    Root,
+    Empty,
+    Error(String),
+}
+
+impl From<jotta_core::remote::LsResult> for LsNavResult {
+    fn from(r: jotta_core::remote::LsResult) -> Self {
+        match r {
+            jotta_core::remote::LsResult::Folders(f) => LsNavResult::Folders(f),
+            jotta_core::remote::LsResult::Revisions(r) => LsNavResult::Revisions(r),
+            jotta_core::remote::LsResult::Empty => LsNavResult::Empty,
+        }
+    }
+}
+
+/// Rebuild the remote file list from a navigation result.
+/// Handles Folders, Revisions, Root (static Backup/Archive/Sync), Empty, Error.
+fn rebuild_remote_list_result(
     list: &gtk::ListBox,
-    entries: &[jotta_core::remote::RemoteEntry],
+    result: &LsNavResult,
     selected: &std::rc::Rc<std::cell::RefCell<String>>,
 ) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
     }
     selected.borrow_mut().clear();
-    if entries.is_empty() {
-        let row = adw::ActionRow::builder()
-            .title("(tom)")
-            .subtitle("Denne mappe er tom")
-            .build();
-        list.append(&row);
-        return;
-    }
-    for entry in entries {
-        let subtitle = if entry.is_dir {
-            "Mappe — dobbeltklik for at åbne".to_string()
-        } else {
-            match entry.size {
-                Some(s) => Status::format_bytes(s),
-                None => "Fil".to_string(),
+
+    match result {
+        LsNavResult::Root => {
+            let entries = [
+                ("Backup", "Enheder med backup"),
+                ("Archive", "Arkiverede filer"),
+                ("Sync", "Synkroniseret mappe"),
+            ];
+            for (name, desc) in entries {
+                let row = adw::ActionRow::builder()
+                    .title(name)
+                    .subtitle(&format!("Mappe — {desc}"))
+                    .build();
+                let img = gtk::Image::from_icon_name("folder-symbolic");
+                row.add_prefix(&img);
+                row.set_activatable(true);
+                list.append(&row);
             }
-        };
-        let icon = if entry.is_dir {
-            "folder-symbolic"
-        } else {
-            "text-x-generic-symbolic"
-        };
-        let row = adw::ActionRow::builder()
-            .title(&entry.name)
-            .subtitle(&subtitle)
-            .build();
-        let img = gtk::Image::from_icon_name(icon);
-        row.add_prefix(&img);
-        row.set_activatable(true);
-        list.append(&row);
+        }
+        LsNavResult::Folders(entries) => {
+            if entries.is_empty() {
+                let row = adw::ActionRow::builder()
+                    .title("(tom)")
+                    .subtitle("Denne mappe er tom")
+                    .build();
+                list.append(&row);
+                return;
+            }
+            for entry in entries {
+                let subtitle = if entry.is_dir {
+                    "Mappe — dobbeltklik for at åbne".to_string()
+                } else {
+                    match entry.size {
+                        Some(s) => Status::format_bytes(s),
+                        None => "Fil".to_string(),
+                    }
+                };
+                let icon = if entry.is_dir {
+                    "folder-symbolic"
+                } else {
+                    "text-x-generic-symbolic"
+                };
+                let row = adw::ActionRow::builder()
+                    .title(&entry.name)
+                    .subtitle(&subtitle)
+                    .build();
+                let img = gtk::Image::from_icon_name(icon);
+                row.add_prefix(&img);
+                row.set_activatable(true);
+                list.append(&row);
+            }
+        }
+        LsNavResult::Revisions(revs) => {
+            // File revisions — placeholder for future "gendan gammel version".
+            if revs.is_empty() {
+                let row = adw::ActionRow::builder()
+                    .title("Ingen revisioner")
+                    .subtitle("Filen har ingen tidligere versioner")
+                    .build();
+                list.append(&row);
+                return;
+            }
+            for rev in revs {
+                let subtitle = match rev.size {
+                    Some(s) => format!("Revision {} — {}", rev.id, Status::format_bytes(s)),
+                    None => format!("Revision {}", rev.id),
+                };
+                let row = adw::ActionRow::builder()
+                    .title(&format!("Version {}", rev.id))
+                    .subtitle(&subtitle)
+                    .build();
+                let img = gtk::Image::from_icon_name("text-x-generic-symbolic");
+                row.add_prefix(&img);
+                list.append(&row);
+            }
+        }
+        LsNavResult::Empty => {
+            let row = adw::ActionRow::builder()
+                .title("(tom)")
+                .subtitle("Intet at vise")
+                .build();
+            list.append(&row);
+        }
+        LsNavResult::Error(msg) => {
+            // Graceful error — e.g. ghost device "Cannot find device".
+            let row = adw::ActionRow::builder()
+                .title("Kunne ikke indlæse")
+                .subtitle(msg)
+                .build();
+            row.add_css_class("error");
+            let img = gtk::Image::from_icon_name("dialog-warning-symbolic");
+            row.add_prefix(&img);
+            list.append(&row);
+        }
     }
 }
 
@@ -1694,150 +1739,3 @@ fn rebuild_downloads_list(
         list.append(&row);
     }
 }
-
-/// Rebuild the trash list. Each row has "Gendan" and "Tøm" (purge) buttons.
-/// Purge is DESTRUCTIVE — always confirmed (safety rule 3).
-fn rebuild_trash_list(
-    list: &gtk::ListBox,
-    entries: &[jotta_core::remote::TrashEntry],
-) {
-    while let Some(row) = list.row_at_index(0) {
-        list.remove(&row);
-    }
-    if entries.is_empty() {
-        let row = adw::ActionRow::builder()
-            .title("Papirkurven er tom")
-            .subtitle("Slettede filer vises her i 30 dage")
-            .build();
-        list.append(&row);
-        return;
-    }
-    for entry in entries {
-        let subtitle = if entry.is_dir {
-            "Mappe".to_string()
-        } else {
-            match entry.size {
-                Some(s) => Status::format_bytes(s),
-                None => "Fil".to_string(),
-            }
-        };
-        let row = adw::ActionRow::builder()
-            .title(&entry.name)
-            .subtitle(&subtitle)
-            .build();
-        let icon = if entry.is_dir {
-            "folder-symbolic"
-        } else {
-            "text-x-generic-symbolic"
-        };
-        let img = gtk::Image::from_icon_name(icon);
-        row.add_prefix(&img);
-
-        // Restore button — NOT destructive (reverses a delete).
-        let restore_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
-        restore_btn.add_css_class("flat");
-        restore_btn.set_valign(gtk::Align::Center);
-        restore_btn.set_tooltip_text(Some("Gendan til original placering"));
-        let path = entry.path.clone();
-        let list_restore = list.clone();
-        restore_btn.connect_clicked(move |_| {
-            // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
-            let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
-            let refresh_rx = Arc::new(Mutex::new(refresh_rx));
-            let list_r = list_restore.clone();
-            glib::idle_add_local(move || {
-                let rx = refresh_rx.lock().unwrap();
-                match rx.try_recv() {
-                    Ok(entries) => {
-                        rebuild_trash_list(&list_r, &entries);
-                        glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-                }
-            });
-
-            let path = path.clone();
-            std::thread::spawn(move || {
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    let _ = client.run(&JottaCommand::TrashRestore(path));
-                }
-                // Refresh trash list after restore.
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
-                        let entries = jotta_core::remote::parse_trash(&text);
-                        let _ = refresh_tx.send(entries);
-                    }
-                }
-            });
-        });
-        row.add_suffix(&restore_btn);
-
-        // Purge button — DESTRUCTIVE, always confirmed.
-        let purge_btn = gtk::Button::from_icon_name("user-trash-symbolic");
-        purge_btn.add_css_class("flat");
-        purge_btn.set_valign(gtk::Align::Center);
-        purge_btn.set_tooltip_text(Some("Slet permanent (kan ikke fortrydes)"));
-        let path = entry.path.clone();
-        let name = entry.name.clone();
-        let list_purge = list.clone();
-        purge_btn.connect_clicked(move |_| {
-            let confirm = adw::AlertDialog::new(
-                Some("Slet permanent fra papirkurv?"),
-                Some(&format!(
-                    "`{name}` slettes permanent fra Jottacloud. Dette kan IKKE fortrydes."
-                )),
-            );
-            confirm.add_response("cancel", "Annuller");
-            confirm.add_response("purge", "Slet permanent");
-            confirm.set_response_appearance("purge", adw::ResponseAppearance::Destructive);
-            confirm.set_default_response(Some("cancel"));
-            confirm.set_close_response("cancel");
-            let path = path.clone();
-            let root = list_purge.root();
-            let list_purge_inner = list_purge.clone();
-            confirm.choose(&root.unwrap(), None::<&gtk::gio::Cancellable>, move |resp| {
-                if resp == "purge" {
-                    // Refresh channel: worker sends Vec<TrashEntry>, main thread rebuilds.
-                    let (refresh_tx, refresh_rx) = std::sync::mpsc::channel::<Vec<jotta_core::remote::TrashEntry>>();
-                    let refresh_rx = Arc::new(Mutex::new(refresh_rx));
-                    let list_r = list_purge_inner.clone();
-                    glib::idle_add_local(move || {
-                        let rx = refresh_rx.lock().unwrap();
-                        match rx.try_recv() {
-                            Ok(entries) => {
-                                rebuild_trash_list(&list_r, &entries);
-                                glib::ControlFlow::Break
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-                        }
-                    });
-
-                    let path = path.clone();
-                    std::thread::spawn(move || {
-                        if let Some(loc) = BinaryLocator::from_path() {
-                            let client = CliClient::new(loc);
-                            let _ = client.run(&JottaCommand::TrashPurge(path));
-                        }
-                        // Refresh trash list after purge.
-                        if let Some(loc) = BinaryLocator::from_path() {
-                            let client = CliClient::new(loc);
-                            if let Ok(text) = client.run_text(&JottaCommand::TrashList) {
-                                let entries = jotta_core::remote::parse_trash(&text);
-                                let _ = refresh_tx.send(entries);
-                            }
-                        }
-                    });
-                }
-            });
-        });
-        row.add_suffix(&purge_btn);
-
-        list.append(&row);
-    }
-}
-
-

@@ -1,86 +1,140 @@
-//! Tolerant parsers for jotta-cli text output (non-JSON commands).
+//! Tolerant parsers for jotta-cli JSON output.
 //!
-//! `jotta-cli ls`, `jotta-cli list downloads`, and `jotta-cli trash ls`
-//! emit human-readable text, not JSON. The schemas are undocumented and
-//! vary between versions, so these parsers are deliberately tolerant:
-//! they extract what they can and ignore the rest.
+//! All remote-browsing commands (`ls`, `list downloads`) now use `--json`.
+//! The schemas are verified against real jotta-cli output (Fedora, 2026) but
+//! casing is inconsistent ("Folders" vs "revisions"), so parsers are
+//! case-tolerant and never assume a fixed key casing.
 
-/// One entry from `jotta-cli ls <remote_path>`.
+use crate::json::Value;
+
+/// One entry from `jotta-cli ls <remote_path> --json`.
 ///
-/// The `ls` output format is not documented. We tolerate several shapes:
-/// - `drwxr-xr-x  0 user group  12345 Jan  1 12:00 foldername`
-/// - `foldername/` (trailing slash = directory)
-/// - `-rw-r--r--  1 user group  12345 Jan  1 12:00 filename.txt`
+/// Verified schema for a folder listing:
+/// ```json
+/// {"Folders": [{"Name": "Laptop", "Path": "/backup/Laptop", "Modified": 1792743158517, "Size": 7867524812}]}
+/// ```
+/// `Size` is OPTIONAL (some devices/folders omit it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteEntry {
     pub name: String,
     pub is_dir: bool,
-    /// Size in bytes, if parseable.
+    /// Size in bytes, if present in the JSON.
     pub size: Option<u64>,
+    /// Remote path (e.g. `/backup/Laptop`), if present.
+    pub remote_path: Option<String>,
 }
 
-/// Parse `jotta-cli ls <path>` text output into entries.
+/// One revision of a remote file (from `ls <file> --json`).
 ///
-/// Handles both `ls -l`-style columns and bare names (one per line).
-/// Directory entries are detected by trailing `/` or a leading `d` in
-/// the permission column.
-pub fn parse_ls(text: &str) -> Vec<RemoteEntry> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("total ") {
-            continue;
+/// Verified schema:
+/// ```json
+/// {"revisions": [{"id": "1", "size": 3778, "checksum": "f232...", "createdAtMillis": ..., "modifiedAtMillis": ...}]}
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRevision {
+    pub id: String,
+    pub size: Option<u64>,
+    pub checksum: Option<String>,
+}
+
+/// Result of `ls --json`: either a folder listing or file revisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LsResult {
+    Folders(Vec<RemoteEntry>),
+    Revisions(Vec<FileRevision>),
+    Empty,
+}
+
+/// Case-tolerant key lookup: tries exact, lowercase, and capitalized variants.
+fn get_ci<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Value::Object(map) = v {
+        // Try exact match first.
+        if let Some(val) = map.get(key) {
+            return Some(val);
         }
-        // Trailing-slash directory: "foldername/"
-        if let Some(name) = line.strip_suffix('/') {
-            if !name.contains(char::is_whitespace) || line.split_whitespace().count() == 1 {
-                entries.push(RemoteEntry {
-                    name: name.to_string(),
-                    is_dir: true,
-                    size: None,
-                });
-                continue;
+        // Try case-insensitive match.
+        let lower = key.to_lowercase();
+        for (k, val) in map {
+            if k.to_lowercase() == lower {
+                return Some(val);
             }
-        }
-        // `ls -l`-style: permissions links owner group size month day time name
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 5 {
-            let is_dir = parts[0].starts_with('d');
-            let size = parts.get(4).and_then(|s| s.parse::<u64>().ok());
-            // Name is everything after the 8th column (permissions, links, owner,
-            // group, size, month, day, time/year).
-            let name = if parts.len() > 8 {
-                parts[8..].join(" ")
-            } else if parts.len() > 5 {
-                parts[parts.len() - 1].to_string()
-            } else {
-                continue;
-            };
-            if !name.is_empty() && name != "." && name != ".." {
-                entries.push(RemoteEntry {
-                    name,
-                    is_dir,
-                    size,
-                });
-                continue;
-            }
-        }
-        // Bare name (one per line).
-        if !line.contains(char::is_whitespace) {
-            entries.push(RemoteEntry {
-                name: line.to_string(),
-                is_dir: false,
-                size: None,
-            });
         }
     }
-    entries
+    None
 }
 
-/// One download from `jotta-cli list downloads`.
+fn as_u64_ci(v: &Value, key: &str) -> Option<u64> {
+    get_ci(v, key).and_then(|x| x.as_f64()).map(|n| n as u64)
+}
+
+fn as_str_ci<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    get_ci(v, key).and_then(|x| x.as_str())
+}
+
+/// Parse `jotta-cli ls <path> --json` output.
+///
+/// Handles two verified schemas (case-tolerant):
+/// - Folder: `{"Folders": [{"Name", "Path", "Modified", "Size"?}]}`
+/// - File:   `{"revisions": [{"id", "size", "checksum", ...}]}`
+///
+/// Also tolerates a bare array of folder objects (no wrapper key).
+pub fn parse_ls_json(v: &Value) -> LsResult {
+    // Try "Folders" (case-tolerant).
+    if let Some(arr) = get_ci(v, "Folders").and_then(|x| x.as_array()) {
+        let entries: Vec<RemoteEntry> = arr
+            .iter()
+            .filter_map(|item| {
+                let name = as_str_ci(item, "Name")?.to_string();
+                Some(RemoteEntry {
+                    name,
+                    is_dir: true,
+                    size: as_u64_ci(item, "Size"),
+                    remote_path: as_str_ci(item, "Path").map(str::to_owned),
+                })
+            })
+            .collect();
+        return LsResult::Folders(entries);
+    }
+    // Try "revisions" (case-tolerant).
+    if let Some(arr) = get_ci(v, "revisions").and_then(|x| x.as_array()) {
+        let revisions: Vec<FileRevision> = arr
+            .iter()
+            .filter_map(|item| {
+                let id = as_str_ci(item, "id")?.to_string();
+                Some(FileRevision {
+                    id,
+                    size: as_u64_ci(item, "size"),
+                    checksum: as_str_ci(item, "checksum").map(str::to_owned),
+                })
+            })
+            .collect();
+        return LsResult::Revisions(revisions);
+    }
+    // Try a bare array of folder objects.
+    if let Value::Array(arr) = v {
+        let entries: Vec<RemoteEntry> = arr
+            .iter()
+            .filter_map(|item| {
+                let name = as_str_ci(item, "Name")?.to_string();
+                Some(RemoteEntry {
+                    name,
+                    is_dir: true,
+                    size: as_u64_ci(item, "Size"),
+                    remote_path: as_str_ci(item, "Path").map(str::to_owned),
+                })
+            })
+            .collect();
+        if !entries.is_empty() {
+            return LsResult::Folders(entries);
+        }
+    }
+    LsResult::Empty
+}
+
+/// One download from `jotta-cli list downloads --json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadEntry {
-    /// The download ID (used for --abort / --retry).
+    /// The download ID (used for --abort / --retry / --clear).
     pub id: String,
     /// Remote path being downloaded.
     pub remote_path: String,
@@ -97,148 +151,60 @@ pub enum DownloadStatus {
     Completed,
 }
 
-/// Parse `jotta-cli list downloads` text output.
+/// Parse `jotta-cli list downloads --json` output.
 ///
-/// Format is undocumented; tolerate several shapes:
-/// - `ID  STATUS  REMOTE_PATH  LOCAL_DEST`
-/// - `ID: xxx  Status: failed  Remote: Backup/X  Dest: /tmp`
-/// - Table with header row.
-pub fn parse_downloads(text: &str) -> Vec<DownloadEntry> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Skip header rows (a header has column names without "key: value" colons).
-        let lower = line.to_lowercase();
-        let is_header = (lower.starts_with("downloadid") || lower.starts_with("id "))
-            && !line.contains(':');
-        if is_header {
-            continue;
-        }
-        // Try "key: value" pairs on one line (separated by 2+ spaces or tabs).
-        if line.contains(':') && !line.starts_with('/') {
-            let mut id = String::new();
-            let mut remote = String::new();
-            let mut dest = String::new();
-            let mut status = DownloadStatus::Ongoing;
-            // Split on 2+ spaces or tab to keep "key: value" pairs together.
-            let parts: Vec<&str> = line
-                .split(|c: char| c == '\t')
-                .flat_map(|s| s.split("  "))
-                .collect();
-            for part in parts {
-                let part = part.trim();
-                if let Some((k, v)) = part.split_once(':') {
-                    let k = k.trim().to_lowercase();
-                    let v = v.trim();
-                    match k.as_str() {
-                        "downloadid" | "id" => id = v.to_string(),
-                        "remote" | "remotepath" | "source" => remote = v.to_string(),
-                        "dest" | "destination" | "local" | "localdest" => dest = v.to_string(),
-                        "status" | "state" => {
-                            status = match v.to_lowercase().as_str() {
-                                "failed" | "error" | "errored" => DownloadStatus::Failed,
-                                "completed" | "complete" | "done" | "finished" => DownloadStatus::Completed,
-                                _ => DownloadStatus::Ongoing,
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if !id.is_empty() {
-                entries.push(DownloadEntry {
-                    id,
-                    remote_path: remote,
-                    local_dest: dest,
-                    status,
-                });
-                continue;
-            }
-        }
-        // Whitespace-separated columns: ID STATUS REMOTE DEST (or similar).
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let id = parts[0].to_string();
-            let status = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
+/// Schema is undocumented; tolerate several shapes:
+/// - Array of objects with id/status/remote/dest keys (case-tolerant).
+/// - Object with "downloads" or "Downloads" array wrapper.
+pub fn parse_downloads_json(v: &Value) -> Vec<DownloadEntry> {
+    // Unwrap if there's a "downloads"/"Downloads" array.
+    let arr = get_ci(v, "downloads")
+        .and_then(|x| x.as_array())
+        .or_else(|| match v {
+            Value::Array(a) => Some(a.as_slice()),
+            _ => None,
+        });
+    let Some(arr) = arr else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let id = as_str_ci(item, "id")
+                .or_else(|| as_str_ci(item, "downloadid"))
+                .or_else(|| as_str_ci(item, "downloadId"))?
+                .to_string();
+            let status = match as_str_ci(item, "status")
+                .or_else(|| as_str_ci(item, "state"))
+                .map(|s| s.to_lowercase())
+                .as_deref()
+            {
                 Some("failed") | Some("error") | Some("errored") => DownloadStatus::Failed,
-                Some("completed") | Some("complete") | Some("done") => DownloadStatus::Completed,
+                Some("completed") | Some("complete") | Some("done") | Some("finished") => {
+                    DownloadStatus::Completed
+                }
                 _ => DownloadStatus::Ongoing,
             };
-            let remote_path = parts.get(2).unwrap_or(&"").to_string();
-            let local_dest = parts.get(3).unwrap_or(&"").to_string();
-            entries.push(DownloadEntry {
+            let remote_path = as_str_ci(item, "remote")
+                .or_else(|| as_str_ci(item, "remotepath"))
+                .or_else(|| as_str_ci(item, "remotePath"))
+                .or_else(|| as_str_ci(item, "source"))
+                .unwrap_or("")
+                .to_string();
+            let local_dest = as_str_ci(item, "dest")
+                .or_else(|| as_str_ci(item, "destination"))
+                .or_else(|| as_str_ci(item, "local"))
+                .or_else(|| as_str_ci(item, "localdest"))
+                .or_else(|| as_str_ci(item, "localDest"))
+                .unwrap_or("")
+                .to_string();
+            Some(DownloadEntry {
                 id,
                 remote_path,
                 local_dest,
                 status,
-            });
-        }
-    }
-    entries
-}
-
-/// One item from `jotta-cli trash ls`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrashEntry {
-    /// Remote path of the trashed item (used for restore/purge).
-    pub path: String,
-    /// Display name (last path component).
-    pub name: String,
-    /// Whether it's a folder.
-    pub is_dir: bool,
-    /// Size in bytes, if parseable.
-    pub size: Option<u64>,
-    /// When it was deleted, if parseable.
-    pub deleted_at: Option<String>,
-}
-
-/// Parse `jotta-cli trash ls` text output.
-///
-/// Format is undocumented; tolerate `ls -l`-style and bare-path shapes.
-pub fn parse_trash(text: &str) -> Vec<TrashEntry> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("total ") {
-            continue;
-        }
-        // `ls -l`-style: permissions links owner group size month day time path
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 5 && parts[0].starts_with(['d', '-']) {
-            let is_dir = parts[0].starts_with('d');
-            let size = parts.get(4).and_then(|s| s.parse::<u64>().ok());
-            let path = if parts.len() > 8 {
-                parts[8..].join(" ")
-            } else {
-                continue;
-            };
-            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            entries.push(TrashEntry {
-                path,
-                name,
-                is_dir,
-                size,
-                deleted_at: None,
-            });
-            continue;
-        }
-        // Bare path (one per line).
-        if line.starts_with('/') || line.contains('/') {
-            let trimmed = line.trim_end_matches('/');
-            let name = trimmed.rsplit('/').next().unwrap_or(trimmed).to_string();
-            entries.push(TrashEntry {
-                path: line.to_string(),
-                name,
-                is_dir: line.ends_with('/'),
-                size: None,
-                deleted_at: None,
-            });
-        }
-    }
-    entries
+            })
+        })
+        .collect()
 }
 
 /// Build the remote path prefix for a backup folder.
@@ -262,79 +228,132 @@ pub fn archive_remote_path() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json;
+
+    /// Real `jotta-cli ls Backup --json` output (Fedora, 2026).
+    /// Note: "Desk" has NO Size field, "Laptop" does — parser must tolerate both.
+    const REAL_LS_BACKUP: &str = r#"{
+        "Folders": [
+            {"Name": "Desk", "Path": "/backup/Desk", "Modified": 1792662822641},
+            {"Name": "Laptop", "Path": "/backup/Laptop", "Modified": 1792743158517, "Size": 7867524812}
+        ]
+    }"#;
+
+    /// Real `jotta-cli ls <file> --json` output (revisions).
+    const REAL_LS_FILE: &str = r#"{
+        "revisions": [
+            {
+                "id": "1",
+                "size": 3778,
+                "checksum": "f232b050ba20bbe45c1a15771bab281f",
+                "createdAtMillis": 1791366225783,
+                "modifiedAtMillis": 1761198640000
+            }
+        ]
+    }"#;
 
     #[test]
-    fn parses_ls_long_format() {
-        let text = "total 42\ndrwxr-xr-x  0 user group   4096 Jan  1 12:00 Documents\n-rw-r--r--  1 user group 123456 Jan  2 09:30 report.pdf\n";
-        let entries = parse_ls(text);
+    fn parses_ls_folders_real_schema() {
+        let v = json::parse(REAL_LS_BACKUP).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Folders(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].name, "Desk");
+                assert!(entries[0].is_dir);
+                assert_eq!(entries[0].size, None); // Size optional — Desk omits it
+                assert_eq!(entries[0].remote_path.as_deref(), Some("/backup/Desk"));
+                assert_eq!(entries[1].name, "Laptop");
+                assert_eq!(entries[1].size, Some(7867524812));
+            }
+            _ => panic!("expected Folders"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_revisions_real_schema() {
+        let v = json::parse(REAL_LS_FILE).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Revisions(revs) => {
+                assert_eq!(revs.len(), 1);
+                assert_eq!(revs[0].id, "1");
+                assert_eq!(revs[0].size, Some(3778));
+                assert_eq!(
+                    revs[0].checksum.as_deref(),
+                    Some("f232b050ba20bbe45c1a15771bab281f")
+                );
+            }
+            _ => panic!("expected Revisions"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_case_tolerant() {
+        // Lowercase "folders" should also work.
+        let v = json::parse(r#"{"folders": [{"name": "X", "size": 100}]}"#).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Folders(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].name, "X");
+                assert_eq!(entries[0].size, Some(100));
+            }
+            _ => panic!("expected Folders (case-tolerant)"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_bare_array() {
+        let v = json::parse(r#"[{"Name": "A"}, {"Name": "B", "Size": 50}]"#).unwrap();
+        match parse_ls_json(&v) {
+            LsResult::Folders(entries) => assert_eq!(entries.len(), 2),
+            _ => panic!("expected Folders (bare array)"),
+        }
+    }
+
+    #[test]
+    fn parses_ls_empty() {
+        let v = json::parse(r#"{"Folders": []}"#).unwrap();
+        assert_eq!(parse_ls_json(&v), LsResult::Folders(vec![]));
+        let v = json::parse(r#"{}"#).unwrap();
+        assert_eq!(parse_ls_json(&v), LsResult::Empty);
+    }
+
+    #[test]
+    fn parses_downloads_json_array() {
+        let v = json::parse(
+            r#"[
+                {"id": "abc", "status": "ongoing", "remote": "Backup/Laptop/Docs", "dest": "/tmp"},
+                {"id": "def", "status": "failed", "remotePath": "Archive/f.txt", "localDest": "/home"}
+            ]"#,
+        )
+        .unwrap();
+        let entries = parse_downloads_json(&v);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "Documents");
-        assert!(entries[0].is_dir);
-        assert_eq!(entries[1].name, "report.pdf");
-        assert!(!entries[1].is_dir);
-        assert_eq!(entries[1].size, Some(123456));
-    }
-
-    #[test]
-    fn parses_ls_bare_names() {
-        let text = "Documents\nPhotos\nfile.txt\n";
-        let entries = parse_ls(text);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].name, "Documents");
-        assert!(!entries[0].is_dir);
-    }
-
-    #[test]
-    fn parses_ls_trailing_slash_dirs() {
-        let text = "Documents/\nPhotos/\nfile.txt\n";
-        let entries = parse_ls(text);
-        assert_eq!(entries.len(), 3);
-        assert!(entries[0].is_dir);
-        assert!(entries[1].is_dir);
-        assert!(!entries[2].is_dir);
-    }
-
-    #[test]
-    fn parses_downloads_columns() {
-        let text = "abc123  ongoing  Backup/Laptop/Documents  /home/eske/Downloads\ndef456  failed   Archive/file.txt         /tmp\n";
-        let entries = parse_downloads(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].id, "abc123");
+        assert_eq!(entries[0].id, "abc");
         assert_eq!(entries[0].status, DownloadStatus::Ongoing);
-        assert_eq!(entries[0].remote_path, "Backup/Laptop/Documents");
+        assert_eq!(entries[0].remote_path, "Backup/Laptop/Docs");
         assert_eq!(entries[1].status, DownloadStatus::Failed);
+        assert_eq!(entries[1].remote_path, "Archive/f.txt");
+        assert_eq!(entries[1].local_dest, "/home");
     }
 
     #[test]
-    fn parses_downloads_keyvalue() {
-        let text = "DownloadID: abc123  Status: failed  Remote: Backup/X  Dest: /tmp\n";
-        let entries = parse_downloads(text);
+    fn parses_downloads_json_wrapped() {
+        let v = json::parse(
+            r#"{"downloads": [{"id": "x1", "state": "completed", "source": "Sync", "destination": "/dl"}]}"#,
+        )
+        .unwrap();
+        let entries = parse_downloads_json(&v);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "abc123");
-        assert_eq!(entries[0].status, DownloadStatus::Failed);
-        assert_eq!(entries[0].remote_path, "Backup/X");
+        assert_eq!(entries[0].id, "x1");
+        assert_eq!(entries[0].status, DownloadStatus::Completed);
     }
 
     #[test]
-    fn parses_trash_bare_paths() {
-        let text = "Backup/Laptop/old_file.txt\nArchive/deleted_folder/\n";
-        let entries = parse_trash(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "old_file.txt");
-        assert!(!entries[0].is_dir);
-        assert_eq!(entries[1].name, "deleted_folder");
-        assert!(entries[1].is_dir);
-    }
-
-    #[test]
-    fn parses_trash_long_format() {
-        let text = "-rw-r--r--  1 user group  1024 Jan  1 12:00 Backup/Laptop/file.txt\ndrwxr-xr-x  0 user group   4096 Jan  2 09:30 Archive/folder\n";
-        let entries = parse_trash(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].path, "Backup/Laptop/file.txt");
-        assert_eq!(entries[0].size, Some(1024));
-        assert!(!entries[0].is_dir);
-        assert!(entries[1].is_dir);
+    fn parses_downloads_empty() {
+        let v = json::parse(r#"[]"#).unwrap();
+        assert!(parse_downloads_json(&v).is_empty());
+        let v = json::parse(r#"{}"#).unwrap();
+        assert!(parse_downloads_json(&v).is_empty());
     }
 
     #[test]
@@ -342,12 +361,5 @@ mod tests {
         assert_eq!(backup_remote_path("Laptop", "Documents"), "Backup/Laptop/Documents");
         assert_eq!(sync_remote_path(), "Sync");
         assert_eq!(archive_remote_path(), "Archive");
-    }
-
-    #[test]
-    fn empty_output_yields_empty_vec() {
-        assert!(parse_ls("").is_empty());
-        assert!(parse_downloads("").is_empty());
-        assert!(parse_trash("").is_empty());
     }
 }
