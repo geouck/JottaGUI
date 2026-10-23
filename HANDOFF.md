@@ -51,6 +51,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - **Status page**: account info (state, email) in a "Konto" PreferencesGroup with values as right-aligned suffix labels. Usage in a "Lagerplads" group with LevelBar.
 - **Remote browser**: root path label shows "Jottacloud" (not "Backup / Archive / Sync"). Downloads section titled "Overførsler". Download entries show filename only in title, full paths in subtitle.
 - **Cross-DE icons**: use freedesktop standard symbolic icon names (`folder-symbolic`, `folder-sync-symbolic`, `document-revert-symbolic`, `emblem-system-symbolic`, `go-next-symbolic`, `go-up-symbolic`, `view-refresh-symbolic`, `user-trash-symbolic`, `process-stop-symbolic`). These exist in all major icon themes (Adwaita, Breeze, Cosmic).
+- **Window controls (CSD)**: GTK4/libadwaita always draws its own headerbar (client-side decorations) — the DE's native titlebar cannot be used. On KDE, window control buttons (minimize/maximize/close) appear larger than on GNOME. CSS overrides via `windowcontrols button { min-width/min-height }` and `headerbar { min-height }` have been tried (iteration 7) but did NOT change button size on KDE — likely cause: KDE's GTK theme integration (kde-gtk-config) or HiDPI scaling. **TODO (debug later)**: investigate `GTK_THEME` env var, `GDK_SCALE`, KDE's `kde-gtk-config` settings, or try `-gtk-icon-size` CSS property on `windowcontrols button image`.
 
 ## Hard safety rules (encode in the GUI)
 

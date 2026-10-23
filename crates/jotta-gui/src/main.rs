@@ -60,14 +60,17 @@ impl App {
 fn main() {
     adw::init().expect("failed to init libadwaita");
 
-    // CSS: kompakte window controls (minimer/maximer/luk) — mindre knapper
-    // så headerbaren ikke fylder for meget på KDE/COSMIC hvor knapperne
-    // ellers bliver for store sammenlignet med GNOME/Nextcloud.
+    // CSS: kompakte window controls (minimer/maximer/luk).
+    // NOTE (iteration 7): These overrides do NOT change button size on KDE
+    // — likely KDE's kde-gtk-config theme integration or HiDPI scaling.
+    // See HANDOFF.md "UI/UX design guidelines" for TODO/debug notes.
     // GTK4 CSS-nodes: windowcontrols > button.minimize/.maximize/.close
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
         "windowcontrols button { min-width: 28px; min-height: 28px; padding: 0 4px; }\n\
-         headerbar { min-height: 40px; }",
+         windowcontrols button image { -gtk-icon-size: 16px; }\n\
+         headerbar { min-height: 40px; }\n\
+         headerbar button { min-width: 32px; min-height: 32px; }",
     );
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("no display"),
