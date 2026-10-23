@@ -296,7 +296,8 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     );
     stack.add_titled(&restore_page, Some("restore"), "Gendan");
 
-    stack.add_titled(&placeholder("Indstillinger"), Some("settings"), "Indstillinger");
+    let settings_page = build_settings_page();
+    stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
         #[strong]
@@ -390,11 +391,12 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                 JottaCommand::Pause
             };
             // Sæt lockout så polleren ikke reverterer før status opdateres.
+            // 15s: jottad kan være langsom til at opdatere status efter pause.
             pause_lockout.store(true, Ordering::SeqCst);
             {
                 let lockout = pause_lockout.clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_secs(5));
+                    std::thread::sleep(Duration::from_secs(15));
                     lockout.store(false, Ordering::SeqCst);
                 });
             }
@@ -935,16 +937,44 @@ Vil du erstatte den?",
         .join("jotta-gui.pid");
     let _ = std::fs::write(&gui_pid_file, std::process::id().to_string());
 
-    // Når vinduet lukkes: sæt shutdown-flag, ryd PID-fil, og exit processen.
-    // std::process::exit garanterer at terminalen frigøres — app.quit() kan
-    // hænge hvis GApplication main loop ikke frigives korrekt.
+    // Når vinduet lukkes: tjek minimize-to-tray indstilling.
+    // Hvis AKTIV: skjul vinduet (minimer til tray) i stedet for at afslutte.
+    // Hvis INAKTIV: afslut processen som normalt.
     {
         let shutdown = shutdown.clone();
         let gui_pid_file = gui_pid_file.clone();
-        window.connect_close_request(move |_window| {
-            shutdown.store(true, Ordering::SeqCst);
-            let _ = std::fs::remove_file(&gui_pid_file);
-            std::process::exit(0);
+        let window = window.clone();
+        window.connect_close_request(move |window| {
+            // Læs minimize-to-tray indstilling
+            let config_path = std::env::var("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(".config")
+                })
+                .join("jotta-desktop")
+                .join("settings.conf");
+            let mtt = std::fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("minimize_to_tray="))
+                        .map(|l| l.trim_end() == "minimize_to_tray=true")
+                })
+                .unwrap_or(true); // Standard: AKTIV
+
+            if mtt {
+                // Minimer til tray: skjul vinduet, behold processen kørende.
+                window.set_visible(false);
+                glib::Propagation::Stop
+            } else {
+                // Normal luk: afslut processen.
+                shutdown.store(true, Ordering::SeqCst);
+                let _ = std::fs::remove_file(&gui_pid_file);
+                std::process::exit(0);
+            }
         });
     }
 
@@ -1029,10 +1059,14 @@ impl StatusWidgets {
         // Pause switch — guard forhindrer feedback-loop:
         // programmatisk set_active trigger IKKE connect_state_set-handleren.
         // REGEL: kun brugerhandling udsteder kommandoer. Polleren skriver ALDRIG kommandoer.
-        // Lockout: efter bruger-klik venter vi 5s før poller må opdatere switchen,
-        // så daemonen når at ændre status først.
+        // Lockout: efter bruger-klik venter vi 15s før poller må opdatere switchen.
+        // paused == None betyder "ukendt" — vi må IKKE røre switchen i det tilfælde,
+        // for jotta-cli status --json rapporterer ikke altid et paused-felt.
         let pause_active = status.state == State::Paused;
-        if self.pause_switch.is_active() != pause_active && !self.pause_lockout.load(Ordering::SeqCst) {
+        if self.pause_switch.is_active() != pause_active
+            && !self.pause_lockout.load(Ordering::SeqCst)
+            && status.paused.is_some()
+        {
             self.pause_updating.set(true);
             self.pause_switch.set_active(pause_active);
             self.pause_updating.set(false);
@@ -1243,10 +1277,63 @@ fn nav_item(label: &str) -> gtk::Widget {
     gtk::Label::new(Some(label)).upcast()
 }
 
-fn placeholder(title: &str) -> gtk::Widget {
-    let label = gtk::Label::new(Some(&format!("{title} — under udvikling")));
-    label.set_vexpand(true);
-    scrollable_page(&label.upcast()).upcast()
+/// Byg Indstillinger-siden med minimize-to-tray switch.
+fn build_settings_page() -> gtk::Widget {
+    let group = adw::PreferencesGroup::builder()
+        .title("Generelt")
+        .build();
+
+    // Minimize-to-tray: når aktiv, minimeres vinduet til tray ved luk i stedet
+    // for at afslutte. Gemmes i en konfigurationsfil.
+    let mtt_row = adw::ActionRow::builder()
+        .title("Minimer til systembakke ved luk")
+        .subtitle("Vinduet minimeres til systembakken i stedet for at lukke")
+        .build();
+    let mtt_switch = gtk::Switch::new();
+    mtt_switch.set_valign(gtk::Align::Center);
+    // Læs nuværende værdi fra konfigurationsfil
+    let config_path = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf");
+    let mtt_enabled = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("minimize_to_tray=")).map(|l| l.trim_end() == "minimize_to_tray=true"))
+        .unwrap_or(true); // Standard: AKTIV
+    mtt_switch.set_active(mtt_enabled);
+    mtt_switch.connect_state_set(move |sw, state| {
+        let config_path = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("jotta-desktop")
+            .join("settings.conf");
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content = format!("minimize_to_tray={}\n", state);
+        let _ = std::fs::write(&config_path, content);
+        sw.set_active(state);
+        Propagation::Proceed
+    });
+    mtt_row.add_suffix(&mtt_switch);
+    mtt_row.set_activatable_widget(Some(&mtt_switch));
+    group.add(&mtt_row);
+
+    let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_widget, 12);
+    box_widget.append(&group);
+    scrollable_page(&box_widget.upcast()).upcast()
 }
 
 /// Parse `jotta-cli ignores list --json` output (backup ignores).
