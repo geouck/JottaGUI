@@ -163,6 +163,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     sidebar.append(&nav_item("Status", "jotta-desktop-idle-symbolic"));
     sidebar.append(&nav_item("Backup", "folder-symbolic"));
     sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
+    sidebar.append(&nav_item("Overførsler", "emblem-downloads-symbolic"));
     sidebar.append(&nav_item("Gendan", "document-revert-symbolic"));
     sidebar.append(&nav_item("Indstillinger", "emblem-system-symbolic"));
 
@@ -232,6 +233,38 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     sync_group.add(&sync_selective_row);
     let sync_page = build_sync_page(&sync_group);
     stack.add_titled(&sync_page, Some("sync"), "Sync");
+
+    // --- Overførsler (transfers) page: uploads + downloads + errors ---
+    // Three sections: active uploads, active downloads, recent errors.
+    // Data comes from `list uploads --json`, `list downloads --json`,
+    // `list downloaderrors --json`, `list uploaderrors --json`.
+    let transfers_uploads_list = gtk::ListBox::new();
+    transfers_uploads_list.add_css_class("boxed-list");
+    let transfers_uploads_group = adw::PreferencesGroup::builder()
+        .title("Aktive uploads")
+        .build();
+    transfers_uploads_group.add(&transfers_uploads_list);
+
+    let transfers_downloads_list = gtk::ListBox::new();
+    transfers_downloads_list.add_css_class("boxed-list");
+    let transfers_downloads_group = adw::PreferencesGroup::builder()
+        .title("Aktive downloads")
+        .build();
+    transfers_downloads_group.add(&transfers_downloads_list);
+
+    let transfers_errors_list = gtk::ListBox::new();
+    transfers_errors_list.add_css_class("boxed-list");
+    let transfers_errors_group = adw::PreferencesGroup::builder()
+        .title("Seneste fejl")
+        .build();
+    transfers_errors_group.add(&transfers_errors_list);
+
+    let transfers_page = build_transfers_page(
+        &transfers_uploads_group,
+        &transfers_downloads_group,
+        &transfers_errors_group,
+    );
+    stack.add_titled(&transfers_page, Some("transfers"), "Overførsler");
 
     // --- Gendan (restore/download) page ---
     // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
@@ -313,8 +346,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     0 => Some("status"),
                     1 => Some("backup"),
                     2 => Some("sync"),
-                    3 => Some("restore"),
-                    4 => Some("settings"),
+                    3 => Some("transfers"),
+                    4 => Some("restore"),
+                    5 => Some("settings"),
                     _ => None,
                 };
                 if let Some(p) = page {
@@ -375,6 +409,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     "status" => Some("Status"),
                     "backup" => Some("Backup"),
                     "sync" => Some("Sync"),
+                    "transfers" => Some("Overførsler"),
                     "restore" => Some("Gendan"),
                     "settings" => Some("Indstillinger"),
                     _ => None,
@@ -897,6 +932,82 @@ Vil du erstatte den?",
         });
     });
 
+    // --- Transfers poller: refresh uploads/downloads/errors every 5s ---
+    // Worker thread fetches plain data (Vec<UploadEntry>, Vec<DownloadEntry>,
+    // Vec<TransferError>) via mpsc; main thread rebuilds the lists.
+    // Error dedup: only toast NEW errors (tracked in a HashSet on main thread).
+    {
+        let uploads_list = transfers_uploads_list.clone();
+        let downloads_list = transfers_downloads_list.clone();
+        let errors_list = transfers_errors_list.clone();
+        let toast_tx = toast_tx.clone();
+        // Channel carries (uploads, downloads, dl_errors, ul_errors).
+        let (tx, rx) = std::sync::mpsc::channel::<(
+            Vec<jotta_core::remote::UploadEntry>,
+            Vec<jotta_core::remote::DownloadEntry>,
+            Vec<jotta_core::remote::TransferError>,
+            Vec<jotta_core::remote::TransferError>,
+        )>();
+        let rx = Arc::new(Mutex::new(rx));
+        // Seen errors for dedup (main thread only — Rc<RefCell<HashSet>>).
+        let seen_errors: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
+        {
+            let uploads_list = uploads_list.clone();
+            let downloads_list = downloads_list.clone();
+            let errors_list = errors_list.clone();
+            let toast_tx = toast_tx.clone();
+            let seen_errors = seen_errors.clone();
+            glib::idle_add_local(move || {
+                let rx = rx.lock().unwrap();
+                while let Ok((uploads, downloads, dl_errors, ul_errors)) = rx.try_recv() {
+                    rebuild_uploads_list(&uploads_list, &uploads);
+                    rebuild_transfers_downloads_list(&downloads_list, &downloads);
+                    rebuild_transfer_errors_list(&errors_list, &dl_errors, &ul_errors);
+                    // Error dedup: toast only NEW errors.
+                    let mut seen = seen_errors.borrow_mut();
+                    for err in dl_errors.iter().chain(ul_errors.iter()) {
+                        let key = format!("{}:{}", err.path.as_deref().unwrap_or(""), err.message);
+                        if seen.insert(key) {
+                            let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
+                            let _ = toast_tx.send(format!("Overførselsfejl: {path_str} — {}", err.message));
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        {
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let uploads = client
+                        .run_json(&JottaCommand::ListUploads)
+                        .map(|v| jotta_core::remote::parse_uploads_json(&v))
+                        .unwrap_or_default();
+                    let downloads = client
+                        .run_json(&JottaCommand::ListDownloads)
+                        .map(|v| jotta_core::remote::parse_downloads_json(&v))
+                        .unwrap_or_default();
+                    let dl_errors = client
+                        .run_json(&JottaCommand::ListDownloadErrors { download_id: None, json: true })
+                        .map(|v| jotta_core::remote::parse_transfer_errors_json(&v))
+                        .unwrap_or_default();
+                    let ul_errors = client
+                        .run_json(&JottaCommand::ListUploadErrors { upload_id: None, json: true })
+                        .map(|v| jotta_core::remote::parse_transfer_errors_json(&v))
+                        .unwrap_or_default();
+                    let _ = tx.send((uploads, downloads, dl_errors, ul_errors));
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            });
+        }
+    }
+
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
@@ -1347,6 +1458,142 @@ fn build_sync_page(group: &adw::PreferencesGroup) -> gtk::Widget {
     set_margin_all(&box_, 24);
     box_.append(group);
     scrollable_page(&box_.upcast()).upcast()
+}
+
+// ---------------------------------------------------------------------------
+// Overførsler (transfers) page
+// ---------------------------------------------------------------------------
+
+fn build_transfers_page(
+    uploads_group: &adw::PreferencesGroup,
+    downloads_group: &adw::PreferencesGroup,
+    errors_group: &adw::PreferencesGroup,
+) -> gtk::Widget {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_, 24);
+    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
+    box_.append(uploads_group);
+    box_.append(downloads_group);
+    box_.append(errors_group);
+    scrollable_page(&box_.upcast()).upcast()
+}
+
+/// Rebuild the uploads list on the Overførsler page.
+fn rebuild_uploads_list(
+    list: &gtk::ListBox,
+    entries: &[jotta_core::remote::UploadEntry],
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    // Only show ongoing + failed uploads (completed are less interesting here).
+    let active: Vec<_> = entries
+        .iter()
+        .filter(|e| e.status != jotta_core::remote::UploadStatus::Completed)
+        .collect();
+    if active.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen aktive uploads")
+            .subtitle("Uploads vises her når de kører")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for entry in active {
+        let status_text = match entry.status {
+            jotta_core::remote::UploadStatus::Ongoing => "Uploader…",
+            jotta_core::remote::UploadStatus::Failed => "Fejlet",
+            jotta_core::remote::UploadStatus::Completed => "Færdig",
+        };
+        // Kun filnavn i titel, fulde stier i undertitel.
+        let file_name = entry
+            .local_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&entry.local_path);
+        let subtitle = format!("{} → {}", entry.local_path, entry.remote_path);
+        let row = adw::ActionRow::builder()
+            .title(&format!("{} ({})", file_name, status_text))
+            .subtitle(&subtitle)
+            .build();
+        let img = gtk::Image::from_icon_name("go-up-symbolic");
+        row.add_prefix(&img);
+        list.append(&row);
+    }
+}
+
+/// Rebuild the downloads list on the Overførsler page.
+fn rebuild_transfers_downloads_list(
+    list: &gtk::ListBox,
+    entries: &[jotta_core::remote::DownloadEntry],
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    let active: Vec<_> = entries
+        .iter()
+        .filter(|e| e.status != jotta_core::remote::DownloadStatus::Completed)
+        .collect();
+    if active.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen aktive downloads")
+            .subtitle("Downloads vises her når de kører")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for entry in active {
+        let status_text = match entry.status {
+            jotta_core::remote::DownloadStatus::Ongoing => "Kører…",
+            jotta_core::remote::DownloadStatus::Failed => "Fejlet",
+            jotta_core::remote::DownloadStatus::Completed => "Færdig",
+        };
+        let file_name = entry
+            .remote_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&entry.remote_path);
+        let subtitle = format!("{} → {}", entry.remote_path, entry.local_dest);
+        let row = adw::ActionRow::builder()
+            .title(&format!("{} ({})", file_name, status_text))
+            .subtitle(&subtitle)
+            .build();
+        let img = gtk::Image::from_icon_name("go-down-symbolic");
+        row.add_prefix(&img);
+        list.append(&row);
+    }
+}
+
+/// Rebuild the transfer errors list on the Overførsler page.
+/// Combines download errors + upload errors into one list.
+fn rebuild_transfer_errors_list(
+    list: &gtk::ListBox,
+    dl_errors: &[jotta_core::remote::TransferError],
+    ul_errors: &[jotta_core::remote::TransferError],
+) {
+    while let Some(row) = list.row_at_index(0) {
+        list.remove(&row);
+    }
+    if dl_errors.is_empty() && ul_errors.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("Ingen fejl")
+            .subtitle("Overførselsfejl vises her")
+            .build();
+        list.append(&row);
+        return;
+    }
+    for err in dl_errors.iter().chain(ul_errors.iter()) {
+        let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
+        let file_name = path_str.rsplit('/').next().unwrap_or(path_str);
+        let row = adw::ActionRow::builder()
+            .title(file_name)
+            .subtitle(&format!("{path_str} — {}", err.message))
+            .build();
+        row.add_css_class("error");
+        let img = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        row.add_prefix(&img);
+        list.append(&row);
+    }
 }
 
 fn replace_add_button(page: &gtk::Widget, new_btn: &gtk::Button) {

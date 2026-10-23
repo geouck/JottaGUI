@@ -115,6 +115,16 @@ pub enum JottaCommand {
     /// `list downloads --json` — list ongoing/failed downloads as JSON.
     /// Verified: `jotta-cli list downloads --help` shows `--json` flag.
     ListDownloads,
+    /// `list uploads --json` — list ongoing/failed uploads as JSON.
+    /// Expected to have `--json` (same pattern as `list downloads --json`).
+    /// Verified: `jotta-cli list --help` shows `uploads` subcommand.
+    ListUploads,
+    /// `list downloaderrors [--downloadid=<id>] [--json]` — error details
+    /// for failed downloads. With no filter, lists all download errors.
+    ListDownloadErrors { download_id: Option<String>, json: bool },
+    /// `list uploaderrors [--uploadid=<id>] [--json]` — error details
+    /// for failed uploads. With no filter, lists all upload errors.
+    ListUploadErrors { upload_id: Option<String>, json: bool },
     /// `list downloadinfo --downloadid=<id> [--json]` — error details for a
     /// failed download. JSON when `json` is true.
     /// NOTE: newer jotta-cli renamed this to `list downloaderrors`
@@ -236,9 +246,28 @@ impl JottaCommand {
                 args.push(format!("--retry={id}"));
             }
             JottaCommand::ListDownloads => push(&mut args, &["list", "downloads", "--json"]),
+            JottaCommand::ListUploads => push(&mut args, &["list", "uploads", "--json"]),
             JottaCommand::ListDownloadInfo { download_id, json } => {
                 push(&mut args, &["list", "downloadinfo"]);
                 args.push(format!("--downloadid={download_id}"));
+                if *json {
+                    push(&mut args, &["--json"]);
+                }
+            }
+            JottaCommand::ListDownloadErrors { download_id, json } => {
+                push(&mut args, &["list", "downloaderrors"]);
+                if let Some(id) = download_id {
+                    args.push(format!("--downloadid={id}"));
+                }
+                if *json {
+                    push(&mut args, &["--json"]);
+                }
+            }
+            JottaCommand::ListUploadErrors { upload_id, json } => {
+                push(&mut args, &["list", "uploaderrors"]);
+                if let Some(id) = upload_id {
+                    args.push(format!("--uploadid={id}"));
+                }
                 if *json {
                     push(&mut args, &["--json"]);
                 }
@@ -269,6 +298,9 @@ impl JottaCommand {
                 | JottaCommand::SyncSelectiveList
                 | JottaCommand::ListDownloadInfo { json: true, .. }
                 | JottaCommand::ListDownloads
+                | JottaCommand::ListUploads
+                | JottaCommand::ListDownloadErrors { json: true, .. }
+                | JottaCommand::ListUploadErrors { json: true, .. }
                 | JottaCommand::LsRemote(_)
         )
     }
@@ -457,6 +489,36 @@ mod tests {
             JottaCommand::ConfigSet { key: "syncpaused".into(), value: "true".into() }.argv(),
             vec!["config", "set", "syncpaused", "true"]
         );
+        // List uploads --json (iteration 7: transfers page).
+        assert_eq!(
+            JottaCommand::ListUploads.argv(),
+            vec!["list", "uploads", "--json"]
+        );
+        // List download errors: all errors with --json.
+        assert_eq!(
+            JottaCommand::ListDownloadErrors { download_id: None, json: true }.argv(),
+            vec!["list", "downloaderrors", "--json"]
+        );
+        // List download errors: single download with --json.
+        assert_eq!(
+            JottaCommand::ListDownloadErrors { download_id: Some("d1".into()), json: true }.argv(),
+            vec!["list", "downloaderrors", "--downloadid=d1", "--json"]
+        );
+        // List download errors: single download without --json.
+        assert_eq!(
+            JottaCommand::ListDownloadErrors { download_id: Some("d1".into()), json: false }.argv(),
+            vec!["list", "downloaderrors", "--downloadid=d1"]
+        );
+        // List upload errors: all errors with --json.
+        assert_eq!(
+            JottaCommand::ListUploadErrors { upload_id: None, json: true }.argv(),
+            vec!["list", "uploaderrors", "--json"]
+        );
+        // List upload errors: single upload with --json.
+        assert_eq!(
+            JottaCommand::ListUploadErrors { upload_id: Some("u1".into()), json: true }.argv(),
+            vec!["list", "uploaderrors", "--uploadid=u1", "--json"]
+        );
     }
 
     #[test]
@@ -479,6 +541,12 @@ mod tests {
         }.is_json());
         assert!(JottaCommand::LsRemote("Backup".into()).is_json());
         assert!(JottaCommand::ListDownloads.is_json());
+        // Iteration 7: uploads and error lists.
+        assert!(JottaCommand::ListUploads.is_json());
+        assert!(JottaCommand::ListDownloadErrors { download_id: None, json: true }.is_json());
+        assert!(!JottaCommand::ListDownloadErrors { download_id: None, json: false }.is_json());
+        assert!(JottaCommand::ListUploadErrors { upload_id: Some("u1".into()), json: true }.is_json());
+        assert!(!JottaCommand::ListUploadErrors { upload_id: None, json: false }.is_json());
         // Trash restore/purge are never JSON.
         assert!(!JottaCommand::TrashRestore("x".into()).is_json());
         assert!(!JottaCommand::TrashPurge("x".into()).is_json());
