@@ -37,6 +37,11 @@ pub struct Status {
     /// Whether a restore/download is currently in progress
     /// (from `State.RestoreWorking`).
     pub restore_working: bool,
+    /// Subscription/product name (from `User.AccountInfo.SubscriptionNameLocalized`
+    /// or `User.AccountInfo.ProductNameLocalized`).
+    pub subscription: Option<String>,
+    /// Account type (from `User.AccountInfo.AccountType`).
+    pub account_type: Option<String>,
 }
 
 /// One backup folder entry (from `Backup.State.Enabled.Backups[]`).
@@ -192,6 +197,22 @@ impl Status {
             .path(&["State", "RestoreWorking"])
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
+
+        // Subscription / account type (iteration 8: Info page).
+        // Verified schema: User.AccountInfo.SubscriptionNameLocalized,
+        // User.AccountInfo.ProductNameLocalized, User.AccountInfo.AccountType.
+        s.subscription = v
+            .path(&["User", "AccountInfo", "SubscriptionNameLocalized"])
+            .or_else(|| v.path(&["User", "AccountInfo", "ProductNameLocalized"]))
+            .or_else(|| v.path(&["User", "AccountInfo", "SubscriptionName"]))
+            .or_else(|| v.path(&["User", "AccountInfo", "ProductName"]))
+            .and_then(|x| x.as_str())
+            .map(str::to_owned);
+        s.account_type = v
+            .path(&["User", "AccountInfo", "AccountType"])
+            .or_else(|| v.path(&["User", "AccountInfo", "accountType"]))
+            .and_then(|x| x.as_str())
+            .map(str::to_owned);
 
         s.state = s.compute_state();
         s
@@ -365,6 +386,40 @@ mod tests {
     fn empty_schema_is_offline() {
         let v = json::parse("{}").unwrap();
         assert_eq!(Status::from_json(&v).state, State::Offline);
+    }
+
+    #[test]
+    fn parses_subscription_and_account_type() {
+        // Verified schema: User.AccountInfo.SubscriptionNameLocalized,
+        // ProductNameLocalized, AccountType.
+        let v = json::parse(
+            r#"{"User":{"Email":"e@e","AccountInfo":{
+                "SubscriptionNameLocalized":"Home subscription 5 TB",
+                "ProductNameLocalized":"Home subscription 5 TB",
+                "AccountType":"premium",
+                "Capacity":5000000000000,
+                "Usage":16993271698
+            }}}"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(
+            s.subscription.as_deref(),
+            Some("Home subscription 5 TB")
+        );
+        assert_eq!(s.account_type.as_deref(), Some("premium"));
+    }
+
+    #[test]
+    fn subscription_falls_back_to_product_name() {
+        // Hvis kun ProductNameLocalized findes (ikke SubscriptionNameLocalized).
+        let v = json::parse(
+            r#"{"User":{"AccountInfo":{"ProductNameLocalized":"Jottacloud Free"}}}"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.subscription.as_deref(), Some("Jottacloud Free"));
+        assert!(s.account_type.is_none());
     }
 
     #[test]

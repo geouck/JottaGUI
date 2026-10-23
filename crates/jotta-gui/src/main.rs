@@ -57,6 +57,15 @@ impl App {
     }
 }
 
+impl Clone for App {
+    fn clone(&self) -> Self {
+        App {
+            client: CliClient::new(self.client.locator().clone()),
+            status: Arc::clone(&self.status),
+        }
+    }
+}
+
 fn main() {
     adw::init().expect("failed to init libadwaita");
 
@@ -203,6 +212,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
     sidebar.append(&nav_item("Overførsler", "emblem-downloads-symbolic"));
     sidebar.append(&nav_item("Gendan", "document-revert-symbolic"));
+    sidebar.append(&nav_item("Info", "dialog-information-symbolic"));
     sidebar.append(&nav_item("Indstillinger", "emblem-system-symbolic"));
 
     let stack = gtk::Stack::new();
@@ -221,6 +231,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // Initial state: ON = kører (ikke pauset). jottad kører som standard,
     // og status.paused er ofte None i JSON — så vi antager "kører".
     pause_switch.set_active(true);
+    // Daemon-not-responding banner: vises når jottad ikke svarer (State::Offline).
+    let daemon_banner = adw::Banner::new("Jottacloud-daemonen svarer ikke");
+    daemon_banner.set_button_label(Some("Genindlæs"));
+    daemon_banner.set_revealed(false);
 
     let status_page = build_status_page(
         &status_state_label,
@@ -228,6 +242,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &status_level,
         &status_usage_label,
         &pause_switch,
+        &daemon_banner,
     );
     stack.add_titled(&status_page, Some("status"), "Status");
 
@@ -371,6 +386,23 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     );
     stack.add_titled(&restore_page, Some("restore"), "Gendan");
 
+    // --- Info page: device, versions, subscription, account ---
+    // Data from status --json (device, email, subscription, usage) +
+    // `jotta-cli version` on a worker thread.
+    let info_device_row = adw::ActionRow::builder().title("Enhed").build();
+    let info_email_row = adw::ActionRow::builder().title("E-mail").build();
+    let info_sub_row = adw::ActionRow::builder().title("Abonnement").build();
+    let info_cli_ver_row = adw::ActionRow::builder().title("jotta-cli version").build();
+    let info_daemon_ver_row = adw::ActionRow::builder().title("jottad version").build();
+    let info_group = adw::PreferencesGroup::builder().title("System").build();
+    info_group.add(&info_device_row);
+    info_group.add(&info_email_row);
+    info_group.add(&info_sub_row);
+    info_group.add(&info_cli_ver_row);
+    info_group.add(&info_daemon_ver_row);
+    let info_page = build_info_page(&info_group);
+    stack.add_titled(&info_page, Some("info"), "Info");
+
     let settings_page = build_settings_page();
     stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
 
@@ -386,7 +418,8 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     2 => Some("sync"),
                     3 => Some("transfers"),
                     4 => Some("restore"),
-                    5 => Some("settings"),
+                    5 => Some("info"),
+                    6 => Some("settings"),
                     _ => None,
                 };
                 if let Some(p) = page {
@@ -449,6 +482,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     "sync" => Some("Sync"),
                     "transfers" => Some("Overførsler"),
                     "restore" => Some("Gendan"),
+                    "info" => Some("Info"),
                     "settings" => Some("Indstillinger"),
                     _ => None,
                 })
@@ -1043,6 +1077,15 @@ Vil du erstatte den?",
         }
     }
 
+    // Daemon banner: "Genindlæs" knap trigger et nyt status-poll.
+    // Polleren kører hver 3s og opdaterer banner'en automatisk.
+    {
+        let toast_tx = toast_tx.clone();
+        daemon_banner.connect_button_clicked(move |_| {
+            let _ = toast_tx.send("Genindlæser status…".to_string());
+        });
+    }
+
     // --- Poller: refresh status every 3s on a worker thread, update UI on main loop ---
     let poll_status = Arc::clone(&core.status);
     let poll_client = core.client();
@@ -1061,7 +1104,54 @@ Vil du erstatte den?",
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
         toast_tx: toast_tx.clone(),
+        daemon_banner: daemon_banner.clone(),
     };
+
+    // --- Info page: fetch versions once on a worker thread ---
+    // `jotta-cli version` gives CLI version; daemon version is not directly
+    // available via CLI — we show "—" for now.
+    {
+        let info_cli_ver_row = info_cli_ver_row.clone();
+        let info_daemon_ver_row = info_daemon_ver_row.clone();
+        let (ver_tx, ver_rx) = std::sync::mpsc::channel::<(Option<String>, Option<String>)>();
+        let ver_rx = Arc::new(Mutex::new(ver_rx));
+        glib::idle_add_local(move || {
+            let rx = ver_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok((cli_ver, daemon_ver)) => {
+                    set_row_value(&info_cli_ver_row, cli_ver.as_deref().unwrap_or("—"));
+                    set_row_value(&info_daemon_ver_row, daemon_ver.as_deref().unwrap_or("—"));
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+        std::thread::spawn(move || {
+            if let Some(loc) = BinaryLocator::from_path() {
+                let client = CliClient::new(loc);
+                let cli_ver = client.run_text(&JottaCommand::Version).ok()
+                    .map(|s| s.trim().to_string());
+                let _ = ver_tx.send((cli_ver, None));
+            }
+        });
+    }
+
+    // Info page: update device/email/subscription from poller's shared status.
+    {
+        let info_device_row = info_device_row.clone();
+        let info_email_row = info_email_row.clone();
+        let info_sub_row = info_sub_row.clone();
+        let status_shared = Arc::clone(&core.status);
+        glib::timeout_add_local(Duration::from_secs(3), move || {
+            let status = status_shared.lock().unwrap().clone();
+            set_row_value(&info_device_row, status.device_name.as_deref().unwrap_or("—"));
+            set_row_value(&info_email_row, status.account_email.as_deref().unwrap_or("—"));
+            set_row_value(&info_sub_row, status.subscription.as_deref().unwrap_or("—"));
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Only Status (plain data) crosses the thread boundary via this channel.
     // The main loop applies it to the widgets; widgets never leave this thread.
     let (status_tx, status_rx) = std::sync::mpsc::channel::<Status>();
@@ -1174,6 +1264,8 @@ struct StatusWidgets {
     sync_path_row: adw::ActionRow,
     sync_count_row: adw::ActionRow,
     toast_tx: std::sync::mpsc::Sender<String>,
+    /// Banner vises når daemon ikke svarer (State::Offline).
+    daemon_banner: adw::Banner,
 }
 
 impl Clone for StatusWidgets {
@@ -1193,6 +1285,7 @@ impl Clone for StatusWidgets {
             sync_path_row: self.sync_path_row.clone(),
             sync_count_row: self.sync_count_row.clone(),
             toast_tx: self.toast_tx.clone(),
+            daemon_banner: self.daemon_banner.clone(),
         }
     }
 }
@@ -1210,6 +1303,13 @@ impl StatusWidgets {
             State::Idle => "Jottacloud: oppe at køre",
         };
         self.state_label.set_text(state_text);
+
+        // Daemon banner: vis når offline (jottad svarer ikke).
+        // Én fejlmeddelelse — polleren viser ikke banner igen før næste offline.
+        let banner_visible = matches!(status.state, State::Offline);
+        if self.daemon_banner.is_revealed() != banner_visible {
+            self.daemon_banner.set_revealed(banner_visible);
+        }
 
         // Email
         match &status.account_email {
@@ -1413,9 +1513,14 @@ fn build_status_page(
     level: &gtk::LevelBar,
     usage_label: &gtk::Label,
     pause_switch: &gtk::Switch,
+    daemon_banner: &adw::Banner,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
+
+    // Daemon-not-responding banner (iteration 8): vises øverst når jottad
+    // ikke svarer. "Genindlæs"-knap trigger et nyt status-poll.
+    box_.append(daemon_banner);
 
     // Konto & status i et struktureret kort (PreferencesGroup).
     // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
@@ -1652,6 +1757,25 @@ fn nav_item(label: &str, icon_name: &str) -> gtk::Widget {
     row_box.upcast()
 }
 
+// ---------------------------------------------------------------------------
+// Info page
+// ---------------------------------------------------------------------------
+
+fn build_info_page(group: &adw::PreferencesGroup) -> gtk::Widget {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    set_margin_all(&box_, 24);
+    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
+    box_.append(group);
+    scrollable_page(&box_.upcast()).upcast()
+}
+
+/// Sæt en værdi som subtitle på en ActionRow (Info-page værdier).
+/// Første kald tilføjer en label; efterfølgende kald opdaterer samme label
+/// ved at sætte teksten direkte på row's subtitle (simpel og robust).
+fn set_row_value(row: &adw::ActionRow, value: &str) {
+    row.set_subtitle(value);
+}
+
 /// Byg Indstillinger-siden med minimize-to-tray switch.
 fn build_settings_page() -> gtk::Widget {
     let group = adw::PreferencesGroup::builder()
@@ -1704,6 +1828,64 @@ fn build_settings_page() -> gtk::Widget {
     mtt_row.add_suffix(&mtt_switch);
     mtt_row.set_activatable_widget(Some(&mtt_switch));
     group.add(&mtt_row);
+
+    // Start ved login: skriver/fjerner XDG autostart .desktop for jotta-desktop.
+    // (jotta-tray har allerede sin egen autostart — denne er for GUI'en.)
+    let autostart_row = adw::ActionRow::builder()
+        .title("Start ved login")
+        .subtitle("Åbn Jotta Desktop automatisk når du logger ind")
+        .build();
+    let autostart_switch = gtk::Switch::new();
+    autostart_switch.set_valign(gtk::Align::Center);
+    let autostart_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("autostart");
+    let autostart_file = autostart_dir.join("jotta-desktop.desktop");
+    autostart_switch.set_active(autostart_file.exists());
+    autostart_switch.connect_state_set(move |sw, state| {
+        let autostart_dir = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(".config")
+            })
+            .join("autostart");
+        let autostart_file = autostart_dir.join("jotta-desktop.desktop");
+        if state {
+            if let Some(parent) = autostart_dir.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Find the current binary path for Exec=.
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "jotta-desktop".to_string());
+            let content = format!(
+                "[Desktop Entry]\n\
+                 Type=Application\n\
+                 Name=Jotta Desktop\n\
+                 Exec={exe}\n\
+                 Icon=jotta-desktop\n\
+                 Terminal=false\n\
+                 X-GNOME-Autostart-enabled=true\n"
+            );
+            let _ = std::fs::write(&autostart_file, content);
+        } else {
+            let _ = std::fs::remove_file(&autostart_file);
+        }
+        sw.set_active(state);
+        Propagation::Proceed
+    });
+    autostart_row.add_suffix(&autostart_switch);
+    autostart_row.set_activatable_widget(Some(&autostart_switch));
+    group.add(&autostart_row);
 
     let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_widget, 12);
