@@ -1,26 +1,55 @@
 {
   "app-id": "io.github.eske.JottaDesktop",
   "runtime": "org.gnome.Platform",
-  "runtime-version": "48",
+  "runtime-version": "50",
   "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
   "command": "jotta-desktop",
   "finish-args": [
     "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
     "--socket=session-bus",
     "--filesystem=host",
     "--filesystem=xdg-run/jottad",
-    "--talk-name=org.freedesktop.Flatpak"
+    "--filesystem=xdg-config/autostart:ro",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.kde.StatusNotifierWatcher"
+  ],
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/share/pkgconfig",
+    "/share/man",
+    "/share/doc",
+    "*.la",
+    "*.a"
   ],
   "modules": [
     {
       "name": "jotta-desktop",
       "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+          "CARGO_NET_OFFLINE": "true",
+          "CARGO_HOME": "/run/build/jotta-desktop/cargo"
+        }
+      },
       "build-commands": [
+        "cp flatpak/cargo-sources.json .",
+        "cp flatpak/setup-cargo-vendor.py .",
+        "python3 setup-cargo-vendor.py cargo-sources.json vendor",
+        "mkdir -p .cargo",
+        "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n\\n[source.vendored-sources]\\ndirectory = \"vendor\"\\n' > .cargo/config.toml",
         "cargo build --release --offline -p jotta-gui -p jotta-tray",
         "install -Dm755 target/release/jotta-desktop /app/bin/jotta-desktop",
         "install -Dm755 target/release/jotta-tray /app/bin/jotta-tray",
         "install -Dm644 data/jotta-desktop.desktop /app/share/applications/jotta-desktop.desktop",
-        "install -Dm644 data/autostart/jotta-tray.desktop /app/share/applications/jotta-tray.desktop",
+        "install -Dm644 data/jotta-tray.desktop /app/share/applications/jotta-tray.desktop",
         "install -Dm644 data/io.github.eske.JottaDesktop.metainfo.xml /app/share/metainfo/io.github.eske.JottaDesktop.metainfo.xml",
         "cp -r data/icons/hicolor /app/share/icons/",
         "gtk-update-icon-cache -f -t /app/share/icons/hicolor || true"
@@ -29,21 +58,6 @@
         {
           "type": "dir",
           "path": ".."
-        }
-      ]
-    },
-    {
-      "name": "jotta-cli",
-      "buildsystem": "simple",
-      "build-commands": [
-        "install -Dm755 jotta-cli /app/bin/jotta-cli",
-        "install -Dm755 jottad /app/bin/jottad"
-      ],
-      "sources": [
-        {
-          "type": "archive",
-          "url": "https://repo.jotta.cloud/downloads/linux/x64/jotta-cli-<version>.tar.gz",
-          "sha256": "TBD"
         }
       ]
     }
