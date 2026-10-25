@@ -40,11 +40,8 @@
         }
       },
       "build-commands": [
-        "cp flatpak/cargo-sources.json .",
-        "cp flatpak/setup-cargo-vendor.py .",
-        "python3 setup-cargo-vendor.py cargo-sources.json vendor",
         "mkdir -p .cargo",
-        "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n\\n[source.vendored-sources]\\ndirectory = \"vendor\"\\n' > .cargo/config.toml",
+        "printf '[source.crates-io]\\nreplace-with = \"vendored-sources\"\\n\\n[source.vendored-sources]\\ndirectory = \"cargo/vendor\"\\n' > .cargo/config.toml",
         "cargo build --release --offline -p jotta-gui -p jotta-tray",
         "install -Dm755 target/release/jotta-desktop /app/bin/jotta-desktop",
         "install -Dm755 target/release/jotta-tray /app/bin/jotta-tray",
@@ -58,7 +55,8 @@
         {
           "type": "dir",
           "path": ".."
-        }
+        },
+        "cargo-sources.json"
       ]
     }
   ]
