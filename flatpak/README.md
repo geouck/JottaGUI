@@ -109,9 +109,35 @@ curl -s https://repo.jotta.cloud/install.sh | bash
 | **50 (current)** | **25.08** | **`rust-stable//25.08`** |
 | 51 (latest) | 26.08 | `rust-stable//26.08` |
 
+## AppStream / appstreamcli compose requirements
+
+`flatpak-builder` runs `appstreamcli compose` after the build. It fails the build
+on errors such as `icon-not-found` and `filters-but-no-output`. Three rules matter:
+
+1. **Icons must be named after the app-id** (`io.github.eske.JottaDesktop.*`),
+   not the executable name. We therefore ship every icon twice in
+   `data/icons/hicolor/`: as `jotta-desktop*.png/svg` (used by the tray at
+   runtime) and as `io.github.eske.JottaDesktop*.png/svg` (used by
+   appstreamcli/Flathub). Sizes: 16–256 px PNG + 512x512 PNG + scalable SVG +
+   symbolic.
+2. **The desktop file must be installed as `<app-id>.desktop`**
+   (`/app/share/applications/io.github.eske.JottaDesktop.desktop`) and the
+   metainfo `<launchable>` must point to that name. flatpak-builder only
+   accepts components `io.github.eske.JottaDesktop` and
+   `io.github.eske.JottaDesktop.desktop`; anything else is filtered out
+   (`filters-but-no-output`). The desktop file's `Icon=` is set to the app-id.
+3. **`mkdir -p /app/share/icons` before `cp -r data/icons/hicolor /app/share/icons/`**.
+   If `/app/share/icons` does not exist yet, `cp -r` creates it as a copy of
+   `hicolor` itself, so icons land in `/app/share/icons/16x16/...` instead of
+   `/app/share/icons/hicolor/16x16/...` and appstreamcli finds nothing.
+
 ## TODO before Flathub submission
 
 - [ ] Add screenshots to `data/io.github.eske.JottaDesktop.metainfo.xml`
-- [ ] Re-render PNG icons with `rsvg-convert` (currently rendered with PIL)
+- [ ] Re-render PNG icons with `rsvg-convert` (currently rendered with PIL/bilinear upscale for 512x512)
 - [ ] Test on GNOME, KDE Plasma, and COSMIC
-- [ ] Verify GTK4/libadwaita version compatibility with the runtime
+- [ ] Verify GTK4/libadwaita version compatibility with the GNOME 50 runtime
+- [ ] "Start ved login" inside the Flatpak writes `Exec=jotta-desktop` to
+      `~/.config/autostart/`, which does not exist on the host — the GUI should
+      detect `/.flatpak-info` and write `Exec=flatpak run io.github.eske.JottaDesktop`
+      instead (Rust change, needs a compile check before pushing)

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jotta Desktop — symbolic (monochrome) icon for panels/menus. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="context-fill" fill-opacity="context-fill-opacity"
+        d="M4.5 11.5a3 3 0 0 1-.4-6A4.3 4.3 0 0 1 12.7 6.8 2.8 2.8 0 0 1 12.2 11.5H4.5z"/>
+</svg>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jotta Desktop — paused: cloud with a pause bar. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <path fill="#8a8f98" d="M14 34a9 9 0 0 1-1.2-17.9A13 13 0 0 1 38 20.5 8.5 8.5 0 0 1 36.5 34H14z"/>
+  <rect x="20" y="22" width="3.5" height="10" rx="1" fill="#ffffff"/>
+  <rect x="25" y="22" width="3.5" height="10" rx="1" fill="#ffffff"/>
+</svg>
