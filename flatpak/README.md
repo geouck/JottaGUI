@@ -74,6 +74,13 @@ flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//25.08
 flatpak-builder --user --install --force-clean build-dir flatpak/io.github.eske.JottaDesktop.json
 ```
 
+> **Memory**: compiling the GTK4 sys crates in parallel can OOM-kill `rustc`
+> (exit code 137) on machines with little RAM. The manifest therefore caps the
+> build with `CARGO_BUILD_JOBS=2` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`
+> (build takes a few minutes longer). On a beefy machine you can raise
+> `CARGO_BUILD_JOBS` in the manifest's `build-options.env`. Check with
+> `free -h` / `dmesg | grep -i oom` if a build dies with code 137.
+
 ### 3. Run
 
 ```bash
