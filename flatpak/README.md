@@ -16,7 +16,24 @@ permission is obtained, the app expects host-installed binaries.
 | File | Purpose |
 |------|---------|
 | `io.github.eske.JottaDesktop.json` | Flatpak manifest |
+| `io.github.eske.JottaDesktop.service` | D-Bus activation service (required because the desktop file has `DBusActivatable=true`) |
 | `cargo-sources.json` | Vendored crate sources (262 entries: 131 archives + 131 checksum files) |
+
+## Export rules (why icon names matter at runtime)
+
+flatpak-builder only exports files under `share/applications`, `share/icons`,
+`share/metainfo`, `share/dbus-1/services` whose **filename starts with the
+app-id** — everything else is skipped ("non-allowed export filename"). Therefore:
+
+- The tray and GUI reference icons by the app-id names
+  (`io.github.eske.JottaDesktop-*`). The `jotta-desktop*` copies are still
+  shipped in the repo for native installs, where both names resolve.
+- The tray also embeds ARGB32 pixmaps (`pixmaps.rs`), so the icon is visible
+  even if the theme lookup fails.
+- `DBusActivatable=true` in the desktop file requires
+  `/app/share/dbus-1/services/io.github.eske.JottaDesktop.service`
+  (with `Exec=/app/bin/jotta-desktop`) — otherwise the export fails with
+  "Desktop file D-Bus activatable, but service file not exported".
 
 ## How cargo-sources.json works
 

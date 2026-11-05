@@ -184,7 +184,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         .default_width(800)
         .default_height(600)
         .title("Jotta Desktop")
-        .icon_name("jotta-desktop")
+        .icon_name("io.github.eske.JottaDesktop")
         .build();
 
     // Toast overlay for command feedback.
@@ -207,7 +207,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
-    sidebar.append(&nav_item("Status", "jotta-desktop-idle-symbolic"));
+    sidebar.append(&nav_item("Status", "io.github.eske.JottaDesktop-symbolic"));
     sidebar.append(&nav_item("Backup", "folder-symbolic"));
     sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
     sidebar.append(&nav_item("Overførsler", "emblem-downloads-symbolic"));

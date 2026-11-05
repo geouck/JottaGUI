@@ -48,6 +48,7 @@
         "install -Dm644 data/jotta-desktop.desktop /app/share/applications/io.github.eske.JottaDesktop.desktop",
         "install -Dm644 data/jotta-tray.desktop /app/share/applications/jotta-tray.desktop",
         "install -Dm644 data/io.github.eske.JottaDesktop.metainfo.xml /app/share/metainfo/io.github.eske.JottaDesktop.metainfo.xml",
+        "install -Dm644 flatpak/io.github.eske.JottaDesktop.service /app/share/dbus-1/services/io.github.eske.JottaDesktop.service",
         "mkdir -p /app/share/icons",
         "cp -r data/icons/hicolor /app/share/icons/",
         "gtk-update-icon-cache -f -t /app/share/icons/hicolor || true"

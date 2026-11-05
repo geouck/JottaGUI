@@ -34,12 +34,15 @@ struct JottaTray {
 
 impl JottaTray {
     fn icon_for(state: State) -> &'static str {
+        // App-id-named icons: flatpak only exports icons whose filename starts
+        // with the app-id, and native installs ship both names, so these work
+        // everywhere (the embedded pixmap is the ultimate fallback).
         match state {
-            State::Idle => "jotta-desktop-idle",
-            State::Syncing => "jotta-desktop-syncing",
-            State::Paused => "jotta-desktop-paused",
-            State::NeedsLogin => "jotta-desktop-attention",
-            State::Offline => "jotta-desktop-offline",
+            State::Idle => "io.github.eske.JottaDesktop-idle",
+            State::Syncing => "io.github.eske.JottaDesktop-syncing",
+            State::Paused => "io.github.eske.JottaDesktop-paused",
+            State::NeedsLogin => "io.github.eske.JottaDesktop-attention",
+            State::Offline => "io.github.eske.JottaDesktop-offline",
         }
     }
 }
