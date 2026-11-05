@@ -142,6 +142,7 @@ spawned.
 |-----|-----|
 | `--share=network` | jotta-cli talks to Jottacloud API + jottad socket |
 | `--share=ipc` | D-Bus for StatusNotifierItem tray |
+| `--device=dri` | GPU access — avoids MESA/ZINK fallback warnings and software rendering |
 | `--socket=fallback-x11` / `--socket=wayland` | GUI display |
 | `--socket=session-bus` | Session D-Bus (notifications, SNI) |
 | `--filesystem=host` | Read/write backup source folders anywhere on the host |

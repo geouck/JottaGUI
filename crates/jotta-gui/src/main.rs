@@ -83,9 +83,6 @@ fn main() {
          \x20   padding-top: 2px;\n\
          \x20   padding-bottom: 2px;\n\
          }\n\
-         windowcontrols {\n\
-         \x20   spacing: 2px;\n\
-         }\n\
          windowcontrols > button {\n\
          \x20   min-width: 16px;\n\
          \x20   min-height: 16px;\n\
