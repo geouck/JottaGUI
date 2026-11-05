@@ -70,7 +70,9 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 8 complete (PR #12 merged)
+## Status: iteration 9 complete (PR #13 merged as e749604)
+
+Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md` (§4 has the parity matrix).
 
 - [x] Workspace + core (28 unit tests green, zero dependencies)
 - [x] Tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (always visible),
@@ -109,16 +111,28 @@ The tray icon switches between 5 named icons based on daemon status:
       (XDG autostart), daemon-not-responding banner on Status page,
       Info page (device, email, subscription, Jottacloud version,
       Jotta Desktop version). Tray stays alive when jottad stops.
+- [x] Flatpak packaging (iteration 9, PR #13 merged as e749604): GNOME 50 runtime,
+      `cargo-sources.json` from committed `Cargo.lock`, app-id icons + D-Bus service
+      file, `--device=dri`, host `jotta-cli`/`jottad` executed on the host via
+      `flatpak-spawn --host` (Flatpak), OOM-safe build caps. Build + install + run
+      verified on Fedora KDE. See `flatpak/README.md`.
 
-### Next: iteration 9 — Flatpak (branch `vibe/iteration9-flatpak`)
+### Next (per SPEC.md)
 
-- [ ] Pin jotta-cli version + sha256, get Jottacloud permission to bundle
-- [ ] Flathub submission + AppStream metadata finalization
+- [ ] Iteration 10 — Flathub self-contained via `extra-data`: pin official
+      `jotta-cli`/`jottad` (repo.jotta.cloud) + SHA256, unpacked to `/app/extra`
+      at install time (Flathub rejects host-dependent apps); mail
+      support@jottacloud.com re: extra-data/bundling acceptance + logo rules
+- [ ] Graphical login (owner-approved decision change 23.10.2026, SPEC.md §2B):
+      feed `jotta-cli login`'s 3 prompts from the GUI (stdin-pipe or PTY) after the
+      owner's empirical transport test in a VM; prompt-matching + unit tests;
+      token never in argv/logs (AdwPasswordEntryRow, transient memory only);
+      NeedsLogin dialog stays as fallback
+- [ ] UI redesign 7→5 sidebar tabs (SPEC.md §3)
 
-### Later: iteration 10 — i18n
+### Later: i18n (da/en first, Danish stays default/fallback — SPEC.md §4)
 
 - [ ] Detect user language (LC_MESSAGES / LANG)
-- [ ] Support: Norwegian (nb/nn), Swedish (sv), Danish (da), German (de), English (en)
 - [ ] Translation catalog (gettext .po or Rust fluent/tr! macro)
 - [ ] jotta-core stays zero-dependency — i18n in jotta-gui + jotta-tray only
 
@@ -131,6 +145,8 @@ The tray icon switches between 5 named icons based on daemon status:
 - [ ] Tray icon color (black/white, Nextcloud-style)
 - [ ] "Gendan gammel version" UI (revisions parsed, no UI yet)
 - [ ] KSNI menu enhancements (device list, activity)
+- [ ] "Vis tray-ikon" button in Indstillinger (verify/respawn jotta-tray via PID
+      file; AppIndicator hint on GNOME)
 - [ ] Snapshot/restore points
 - [ ] Desktop notifications for errors
 

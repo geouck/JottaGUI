@@ -1,7 +1,11 @@
 # HANDOFF - JottaGUI
 
 This document is the complete project context for any AI agent (or human)
-taking over development. Read it fully before writing code.
+taking over development. Read it fully before writing code — and also read
+`jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md` (the owner's
+SPEC.md: Flathub/extra-data packaging strategy, the graphical-login decision
+change, the 7→5 tab redesign, the feature-parity matrix in §4, and the
+Flathub-beta Definition of Done).
 
 ## What this project is
 
@@ -34,7 +38,7 @@ official GUI apps for Windows/macOS; on Linux there is only the CLI.
 - `download <remote> <dest> [--merge]`: `--merge` is only valid for folder sources (not files). The CLI prompts interactively if the destination file exists — the GUI must check and confirm BEFORE issuing the command (no TTY in spawned process).
 - `list` subcommands: `downloads` (has `--json`), `uploads` (has `--json` — VERIFIED, returns `{}` when no uploads), `downloaderrors --downloadid=<id>` (REQUIRES `--downloadid` — no "list all" mode), `uploaderrors --uploadid=<id>` (REQUIRES `--uploadid` — no "list all" mode).
 - Transfer errors are derived from the `Errors` object inside each `list downloads --json` / `list uploads --json` entry (not from a separate `list downloaderrors`/`list uploaderrors` call without ID).
-- `login` has NO flags (only `-h`/`--help`). Login is 3 interactive prompts: (1) accept T&C, (2) Personal Login Token (from jottacloud.com/web/secure Security tab — single-use, short-lived), (3) device name. Login REQUIRES a running jottad AND a TTY — cannot be driven from the GUI (spawned processes have no TTY). DECISION: Account page will NOT implement token login. Instead, when status is NeedsLogin, the GUI shows a dialog with a UriLauncher button to https://www.jottacloud.com/web/secure, instructions to run `jotta-cli login` in a terminal, and a "Prøv igen" (retry) button. `JottaCommand` whitelist is NOT touched — login/logout never go through the GUI.
+- `login` has NO flags (only `-h`/`--help`). Login is 3 interactive prompts: (1) accept T&C, (2) Personal Login Token (from jottacloud.com/web/secure Security tab — single-use, short-lived), (3) device name. Login REQUIRES a running jottad ("Could not connect to jottad" otherwise). DECISION CHANGE (owner-approved 23.10.2026, supersedes the earlier "no token login" rule — SPEC.md §2B): **graphical login is GO**. The GUI will feed the 3 prompts via stdin-pipe or PTY; feeding code lives in jotta-gui ONLY (jotta-core stays zero-dependency); `JottaCommand::Login` with argv `["login"]` is already whitelisted. Token NEVER in argv/logs (argv is readable in /proc/<pid>/cmdline), field is AdwPasswordEntryRow, token held transiently in memory only — jotta-cli owns all credential storage. Prompt-matching verifies expected prompt text before each answer; on mismatch abort and fall back to the existing NeedsLogin dialog (kept as fallback). Implementation waits for the owner's empirical transport test (`printf 'y\n<TOKEN>\n<DEVICE>\n' | jotta-cli login` and `... | flatpak-spawn --host -- jotta-cli login`) run in a VM/container, NEVER on the work laptop (login mutates device credentials). Until implemented, NeedsLogin → dialog with UriLauncher to jottacloud.com/web/secure + terminal instructions + "Prøv igen" retry.
 - `status --json` does NOT reliably include a `paused` field. When paused is unknown (`None`), assume "running" (not paused).
 - RPM repo: `https://repo.jotta.cloud/redhat` (gpgkey `https://repo.jotta.cloud/jotta.gpg`, binary format - import via `gpg --enarmor` or let dnf import it from the repo file's gpgkey directive).
 
@@ -78,12 +82,13 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - Switch guards: `pause_lockout` (AtomicBool, 15s after user click) prevents the poller from reverting the pause switch before jottad updates status. `pause_updating`/`sync_updating` (Rc<Cell<bool>>) prevent feedback loops from programmatic `set_active()`. RULE: only user action issues commands; the poller NEVER issues commands.
 - Pause switch truth: `status.paused != Some(true)` → ON (running). `None` (unknown) is treated as "running". Initial switch state is ON.
 
-## Current state (iteration 8 complete, PR #12 merged)
+## Current state (iteration 9 complete, PR #13 merged as e749604)
 
-- jotta-core: 39 unit tests green. Zero dependencies. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model (incl. subscription/account_type), remote JSON parsers (`ls --json`, `list downloads --json`, `list uploads --json`), file revisions, download/upload entries, transfer errors (`collect_transfer_errors`).
+- jotta-core: 41 unit tests green (incl. 2 Flatpak tests: `host_view`/`host_spawn_prefix`). Zero dependencies. `BinaryLocator::from_path()` now also searches `$JOTTA_CLI`/`$JOTTAD` env overrides, the exe dir, `~/.jottacloud/bin`, `/run/host/usr/local/bin`, `/run/host/usr/bin`, `/usr/local/bin`, `/usr/bin` (jottad falls back to the sibling of jotta-cli). Inside a Flatpak, host binaries are executed ON THE HOST via `flatpak-spawn --host -- <path>` (`host_spawn_prefix()` wraps every `CliClient::run`), and `DaemonSupervisor::ensure_running()` spawns jottad detached on the host (`nohup … &`) — a sandbox-spawned daemon would die with the sandbox; the host systemd daemon is still reused via the socket check and never killed by us. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model (incl. subscription/account_type), remote JSON parsers (`ls --json`, `list downloads --json`, `list uploads --json`), file revisions, download/upload entries, transfer errors (`collect_transfer_errors`).
 - jotta-tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (5 states × 5 sizes). Menu: status, pause/resume (idempotent), "Åbn vindue", "Åbn jottacloud.com", "Afslut". Single-instance via PID file. Spawns GUI via `find_gui_binary()` + reaper thread. Click on icon (`activate()`) opens GUI. Reads minimize-to-tray setting from `~/.config/jotta-desktop/settings.conf`. **Stays alive when jottad stops** (Offline → Active, not Passive — iteration 8 fix).
 - jotta-gui: GTK4/libadwaita main window. GApplication single-instance (`io.github.eske.JottaDesktop`). 7 pages: Status (konto-kort, automatisk backup/sync switch, lagerplads-kort, **daemon-not-responding banner**), Backup (list, "Tilføj mappe", "Udeluk…" chevron, "Fjern" med AlertDialog), Sync (info, start/stop, selective folder dialog), **Overførsler** (aktive uploads/downloads, seneste fejl, 5s poller, error dedup toasts), Gendan/Restore (remote browser "Jottacloud" rod, download dialog, downloads list, papirkurv web-knap), **Info** (enhed, e-mail, abonnement, Jottacloud version, Jotta Desktop version), Indstillinger (minimize-to-tray switch + **start ved login** switch, default ON). Dynamisk topbar titel. Sidebar med symbolic ikoner + app-titel. Ingen H1-overskrifter i sider. 0 deprecation warnings. Kompakt headerbar/windowcontrols via CSS på PRIORITY_USER+1.
-- Data: icon theme (5 states + app icon + symbolic, all hicolor sizes), desktop entries (app + tray autostart), AppStream metainfo, Flatpak manifest (draft).
+- Data: icon theme (5 states + app icon + symbolic, all hicolor sizes incl. 512px + app-id aliases `io.github.eske.JottaDesktop.*` required by flatpak export), desktop entries (app + tray autostart), AppStream metainfo, D-Bus service file.
+- Flatpak (`flatpak/`, verified build+install+run on Fedora KDE by owner): manifest `io.github.eske.JottaDesktop.json` on GNOME 50 runtime (FDSK 25.08 + `rust-stable//25.08`), `cargo-sources.json` (262 entries generated from the committed `Cargo.lock`), icons installed under `/app/share/icons/hicolor` (with `mkdir -p` first — cp drops the hicolor level otherwise), desktop file installed as `<app-id>.desktop`, `--device=dri`, `--filesystem=host` + `--filesystem=host-os`, `--talk-name=org.freedesktop.Flatpak` (for flatpak-spawn), OOM-safe build caps (`CARGO_BUILD_JOBS=2`, `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`). Remaining Flathub TODOs live in `flatpak/README.md` — most importantly **extra-data instead of host-CLI** (SPEC.md §2A: Flathub rejects host-dependent apps), screenshots, rsvg-convert icon re-render, GNOME/KDE/COSMIC regression tests, and autostart `Exec=flatpak run …` when `/.flatpak-info` exists.
 
 ## Roadmap (priority order)
 
@@ -95,8 +100,11 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 6. ~~Restore/download flow~~ ✅ Iteration 6 (PR #6)
 7. ~~**Transfers page**~~ ✅ Iteration 7 (PR #11, branch `vibe/iteration7-transfers-errors`): `list uploads --json` + `list downloads --json` polled every 5s. Error dedup (one toast per unique error). NOTE: `list downloaderrors`/`list uploaderrors` REQUIRE `--downloadid`/`--uploadid` (no "list all" mode) — errors are derived from the `Errors` object inside each download/upload entry via `collect_transfer_errors()`.
 8. ~~**Settings/robustness**~~ ✅ Iteration 8 (PR #12, branch `vibe/iteration8-settings-robustness`): launch on startup toggle (XDG autostart), daemon-not-responding banner on Status page, Info page (device, email, subscription, Jottacloud version, Jotta Desktop version). Tray stays alive when jottad stops (Offline → Active, not Passive).
-9. **Flatpak** (iteration 9, branch `vibe/iteration9-flatpak`): pin jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub submission + AppStream metadata.
-10. **i18n** (iteration 10 or later): multilingual support — detect user language (LC_MESSAGES / LANG), support Norwegian (nb/nn), Swedish (sv), Danish (da), German (de), English (en). Currently all UI strings are hardcoded Danish. Will need a translation catalog (gettext .po files or Rust i18n crate like `fluent` or `tr!` macro). NOTE: jotta-core stays zero-dependency — i18n lives in jotta-gui/jotta-tray only.
+9. ~~**Flatpak**~~ ✅ Iteration 9 (PR #13 merged as e749604, branch `vibe/iteration9-flatpak-9475a0`): builds + installs + runs on Fedora KDE; host `jotta-cli`/`jottad` found via extended `BinaryLocator` and executed on the host via `flatpak-spawn --host`; app-id icons + D-Bus service file; GNOME 50 runtime; OOM-safe build. Host-bundling is NOT the Flathub path — see item 10.
+10. **Flathub self-contained via `extra-data`** (SPEC.md §2A — next iteration): Flathub rejects host-dependent apps, so pin the official `jotta-cli`/`jottad` (RPM repo `https://repo.jotta.cloud/redhat`, gpgkey `https://repo.jotta.cloud/jotta.gpg`) with URL + SHA256 as `extra-data`, unpacked to `/app/extra` at install time (Spotify/Discord model), run jottad as a sandbox child (Model B). Also mail support@jottacloud.com re: extra-data/bundling acceptance + logo/brand rules (SPEC.md §5).
+11. **Graphical login** (SPEC.md §2B — decision change owner-approved 23.10.2026, supersedes PR #11's "no token login" rule): own iteration AFTER the owner's empirical transport test in a VM (`printf 'y\n<TOKEN>\n<DEVICE>\n' | jotta-cli login` and the same via `flatpak-spawn --host --` — stdin pipe suffices if it works; a real PTY is only clean after item 10 moves jotta-cli into the sandbox). Prompt state machine with unit tests; feeding code in jotta-gui only (jotta-core zero-dep); `JottaCommand::Login` argv `["login"]` already whitelisted; token never in argv/logs, AdwPasswordEntryRow, transient in memory; prompt-matching with fallback to the existing NeedsLogin dialog; handle "already logged in"; jottad must run first.
+12. **UI redesign 7→5 tabs** (SPEC.md §3): Status(Hjem)+live hastighed, Backup+schedule, Sync & Arkiv, Overførsler & Gendan, Indstillinger+Info+Konto+båndbredde.
+13. **i18n** (SPEC.md §4: da/en first, post-beta; Danish stays default/fallback): detect via LC_MESSAGES/LANG; translation catalog (gettext .po or fluent/tr!); jotta-core stays zero-dependency — i18n in jotta-gui/jotta-tray only.
 
 ### Future features (owner-requested, roadmap additions 2026-06)
 
@@ -107,7 +115,8 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - ~~**Info page**~~ ✅ Iteration 8 (device, email, subscription, Jottacloud version, Jotta Desktop version)
 - **Advanced settings** (Nextcloud-style): bandwidth limit (`config set maxuploadrate`/`maxdownloadrate`), scan interval (`config set scaninterval`), realtime mode toggle (`scaninterval 0`), webhook status interval. Read current values via `config get` or `config list`.
 - **Account page**: new page or section — account email, subscription plan, usage breakdown, "Log ud" button (`jotta-cli logout` — DESTRUCTIVE, confirm), "Skift bruger" (logout + login), link to jottacloud.com account settings.
-  - **NO token login in GUI** (owner decision, 2026-06): `jotta-cli login` has no flags — it is 3 interactive TTY prompts (T&C, Personal Login Token, device name). GUI-spawned processes have no TTY, so login cannot be driven from the GUI. Instead: when status is `NeedsLogin`, show a dialog with a UriLauncher button to https://www.jottacloud.com/web/secure (Security tab), instructions to run `jotta-cli login` in a terminal, and a "Prøv igen" (retry) button that re-polls status. `JottaCommand` whitelist is NOT touched — login/logout never go through the GUI.
+  - **Graphical token login** — DECISION CHANGE owner-approved 23.10.2026 (supersedes the 2026-06 "no token login" rule; SPEC.md §2B): GUI feeds the 3 `jotta-cli login` prompts via stdin-pipe/PTY (see roadmap item 11). Until that lands, the NeedsLogin dialog (UriLauncher to jottacloud.com/web/secure + terminal instructions + retry) stays as the fallback.
+- **"Vis tray-ikon" button** (Indstillinger, owner-requested 2026-11): verify `jotta-tray` is running (PID file `$XDG_RUNTIME_DIR/jotta-tray.pid`), respawn it if not; on GNOME show a hint that the tray icon needs the AppIndicator extension when it is not visible.
 - **Page consolidation**: consider merging Status + Account into one "Konto" page, or Status + Info. Evaluate after i18n is done. Current 7 pages (Status, Backup, Sync, Overførsler, Gendan, Info, Indstillinger) may become 6-7 with Account split or stay at 7 with consolidation.
 - **Tray icon color** (Nextcloud-style): symbolic black/white variant selectable in Indstillinger.
 
@@ -150,13 +159,17 @@ Use this as the opening message when handing the project to a new agent:
 > GTK4/libadwaita GUI (jotta-gui). Begin by reading HANDOFF.md and README.md
 > in the repo root in full — they contain verified jotta-cli facts, hard
 > safety rules, architecture decisions, process rules and a prioritized roadmap.
-> The project is at iteration 8 (complete, PR #12 merged). Next milestone is
-> roadmap item 9: Flatpak (branch `vibe/iteration9-flatpak` from main) — pin
-> jotta-cli version + sha256, get Jottacloud permission to bundle, Flathub
-> submission. After that: iteration 10 = i18n (Norwegian, Swedish, Danish,
-> German, English — detect user language via LC_MESSAGES/LANG).
+> Also read `jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md`
+> (SPEC.md: Flathub strategy, feature-parity matrix in §4, redesign plan).
+> The project is at iteration 9 (complete, PR #13 merged as e749604 — Flatpak
+> packaging works: build+install+run verified on Fedora KDE). Next milestone
+> is roadmap item 10: Flathub self-contained packaging via extra-data
+> (SPEC.md §2A — Flathub rejects host-dependent apps). Then item 11: graphical
+> login (owner-approved decision change 23.10.2026; wait for the owner's
+> empirical stdin/PTY test result before choosing the transport), item 12:
+> 7→5 tab redesign, item 13: i18n (da/en first, Danish stays default).
 > Never bypass the JottaCommand whitelist, never move sync folders, confirm
 > destructive operations, and keep jotta-core dependency-free.
 > `cargo check -p jotta-gui` MUST be 0 warnings before every push.
-> The owner speaks Danish — UI strings are Danish until i18n lands (iteration 10).
+> The owner speaks Danish — UI strings are Danish until i18n lands (roadmap item 13).
 > Report back with what compiles, what tests pass, and what you changed.
