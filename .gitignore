@@ -1,6 +1,5 @@
 /target
 **/target
 .flatpak-builder
-Cargo.lock
 flatpak/cargo-vendor/
 flatpak/build-dir/
