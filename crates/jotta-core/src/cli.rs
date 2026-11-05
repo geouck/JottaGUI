@@ -21,10 +21,26 @@ pub struct BinaryLocator {
 }
 
 impl BinaryLocator {
-    /// Find binaries on PATH (dev mode / native installs).
+    /// Find binaries on PATH, then in well-known install locations.
+    ///
+    /// Search order for each binary (first existing file wins):
+    /// 1. `$JOTTA_CLI` / `$JOTTAD` env override (must point to an existing file)
+    /// 2. `PATH` (dev mode / native installs)
+    /// 3. next to our own executable (bundled layout)
+    /// 4. `~/.jottacloud/bin` (official Jottacloud tarball installer)
+    /// 5. `/run/host/usr/local/bin`, `/run/host/usr/bin` (host OS seen from a
+    ///    Flatpak with `--filesystem=host-os`; RPM/DEB packages install to
+    ///    `/usr/bin` on the host)
+    /// 6. `/usr/local/bin`, `/usr/bin` (native installs)
+    ///
+    /// `jottad` additionally falls back to the sibling of the found `jotta-cli`.
     pub fn from_path() -> Option<Self> {
-        let cli = which("jotta-cli")?;
-        let daemon = which("jottad").or_else(|| which("jotta-cli").map(|p| p.with_file_name("jottad")))?;
+        let cli = find_binary("jotta-cli", "JOTTA_CLI")?;
+        let daemon = find_binary("jottad", "JOTTAD")
+            .or_else(|| {
+                let sibling = cli.with_file_name("jottad");
+                sibling.is_file().then_some(sibling)
+            })?;
         Some(Self { cli, daemon })
     }
 
@@ -46,6 +62,77 @@ fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Directories that are checked after PATH (see `BinaryLocator::from_path`).
+fn known_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            dirs.push(d.to_path_buf());
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".jottacloud").join("bin"));
+    }
+    // Host OS as seen from inside a Flatpak (--filesystem=host-os).
+    dirs.push(PathBuf::from("/run/host/usr/local/bin"));
+    dirs.push(PathBuf::from("/run/host/usr/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs.push(PathBuf::from("/usr/bin"));
+    dirs
+}
+
+fn find_binary(name: &str, env_var: &str) -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os(env_var) {
+        let p = PathBuf::from(v);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    which(name).or_else(|| {
+        known_dirs()
+            .into_iter()
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+    })
+}
+
+/// True when running inside a Flatpak sandbox (`/.flatpak-info` exists).
+pub fn running_in_flatpak() -> bool {
+    Path::new("/.flatpak-info").exists()
+}
+
+/// Map an in-sandbox path to the equivalent path on the host:
+/// `/run/host/usr/bin/x` -> `/usr/bin/x`; anything else is unchanged
+/// (a Flatpak's `$HOME` is the real home, so home paths are identical).
+pub fn host_view(path: &Path) -> PathBuf {
+    match path.strip_prefix("/run/host") {
+        Ok(rest) => PathBuf::from("/").join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// If we run inside a Flatpak and `bin` is a **host** binary (not bundled under
+/// `/app`), return the argv prefix that runs it on the host via
+/// `flatpak-spawn --host -- <host path>` (requires the
+/// `--talk-name=org.freedesktop.Flatpak` finish-arg). Running host binaries
+/// directly in the sandbox is unreliable (noexec mounts, runtime libs), and a
+/// daemon spawned in-sandbox would die with the sandbox — so on the host it is.
+///
+/// Returns an empty Vec when the binary should be executed directly.
+pub fn host_spawn_prefix(bin: &Path) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    if !running_in_flatpak() || bin.starts_with("/app") {
+        return Vec::new();
+    }
+    let host = host_view(bin);
+    vec![
+        OsString::from("flatpak-spawn"),
+        OsString::from("--host"),
+        OsString::from("--"),
+        host.into_os_string(),
+    ]
 }
 
 /// The set of jotta-cli commands the app knows how to issue.
@@ -321,9 +408,21 @@ impl CliClient {
     }
 
     /// Run a command and capture stdout+stderr. Non-zero exit -> CommandFailed.
+    ///
+    /// Inside a Flatpak, a host-installed jotta-cli is executed on the host via
+    /// `flatpak-spawn --host` (see `host_spawn_prefix`), so it sees the host's
+    /// PATH, config and jottad socket exactly like a terminal would.
     pub fn run(&self, cmd: &JottaCommand) -> Result<Output> {
         let argv = cmd.argv();
-        let out = Command::new(&self.locator.cli)
+        let prefix = host_spawn_prefix(&self.locator.cli);
+        let mut command = if prefix.is_empty() {
+            Command::new(&self.locator.cli)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        let out = command
             .args(&argv)
             .stdin(Stdio::null())
             .output()
@@ -550,5 +649,46 @@ mod tests {
         // Trash restore/purge are never JSON.
         assert!(!JottaCommand::TrashRestore("x".into()).is_json());
         assert!(!JottaCommand::TrashPurge("x".into()).is_json());
+    }
+
+    #[test]
+    fn host_view_strips_run_host_prefix() {
+        assert_eq!(
+            host_view(Path::new("/run/host/usr/bin/jotta-cli")),
+            PathBuf::from("/usr/bin/jotta-cli")
+        );
+        assert_eq!(
+            host_view(Path::new("/run/host/usr/local/bin/jottad")),
+            PathBuf::from("/usr/local/bin/jottad")
+        );
+        // Home paths are identical on host and sandbox (flatpak home = real home).
+        assert_eq!(
+            host_view(Path::new("/home/eske/.jottacloud/bin/jottad")),
+            PathBuf::from("/home/eske/.jottacloud/bin/jottad")
+        );
+        // Bundled app paths are untouched.
+        assert_eq!(
+            host_view(Path::new("/app/bin/jottad")),
+            PathBuf::from("/app/bin/jottad")
+        );
+    }
+
+    #[test]
+    fn host_spawn_prefix_only_in_flatpak_for_host_binaries() {
+        // The test sandbox is not a Flatpak, so the prefix must always be empty
+        // here — regardless of the binary path.
+        if running_in_flatpak() {
+            // (would only happen when tests run inside a flatpak; then host
+            // binaries get the prefix and /app binaries don't)
+            let p = host_spawn_prefix(Path::new("/run/host/usr/bin/jotta-cli"));
+            assert_eq!(p[0], "flatpak-spawn");
+            assert_eq!(p[1], "--host");
+            assert_eq!(p[2], "--");
+            assert_eq!(p[3], "/usr/bin/jotta-cli");
+            assert!(host_spawn_prefix(Path::new("/app/bin/jotta-cli")).is_empty());
+        } else {
+            assert!(host_spawn_prefix(Path::new("/run/host/usr/bin/jotta-cli")).is_empty());
+            assert!(host_spawn_prefix(Path::new("/usr/bin/jotta-cli")).is_empty());
+        }
     }
 }

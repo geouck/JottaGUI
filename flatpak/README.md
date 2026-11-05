@@ -95,12 +95,39 @@ python3 scripts/generate-cargo-sources.py
 
 ## Prerequisites on the host
 
-The user needs `jotta-cli` and `jottad` installed:
+The user needs `jotta-cli` and `jottad` installed (RPM/DEB packages put them in
+`/usr/bin`, the tarball installer in `~/.jottacloud/bin`):
 
 ```bash
-# Fedora/RHEL (official installer)
+# Fedora/RHEL (official RPM repo)
+sudo dnf copr enable ...   # or the official repo from docs.jottacloud.com
+# or the tarball installer:
 curl -s https://repo.jotta.cloud/install.sh | bash
 ```
+
+## How host binaries are found and executed
+
+Inside the sandbox, `PATH` is only `/app/bin:/usr/bin` (the runtime's), so the
+app cannot see host binaries on `PATH`. `BinaryLocator::from_path()` therefore
+also searches (first existing file wins):
+
+1. `$JOTTA_CLI` / `$JOTTAD` env overrides
+2. `PATH`
+3. next to our own executable
+4. `~/.jottacloud/bin` (tarball installer)
+5. `/run/host/usr/local/bin`, `/run/host/usr/bin` (host OS via `--filesystem=host-os`; RPM/DEB install to `/usr/bin` on the host)
+6. `/usr/local/bin`, `/usr/bin` (native)
+
+When a **host** binary is found while running in a Flatpak (`/.flatpak-info`),
+it is executed **on the host** via `flatpak-spawn --host -- <host path>`
+(`host_spawn_prefix()` in `cli.rs`). This needs the
+`--talk-name=org.freedesktop.Flatpak` finish-arg and gives jotta-cli the host's
+PATH, `~/.config/jottacloud` and the jottad socket — exactly like a terminal.
+`DaemonSupervisor::ensure_running()` likewise starts jottad detached on the host
+(`nohup ... &`), because a daemon spawned inside the sandbox would die with the
+sandbox. If the host already runs jottad (systemd user unit `jottad.service`),
+the socket at `$XDG_RUNTIME_DIR/jottad/jottad.socket` is reused and nothing is
+spawned.
 
 ## Finish-args explained
 
@@ -111,7 +138,9 @@ curl -s https://repo.jotta.cloud/install.sh | bash
 | `--socket=fallback-x11` / `--socket=wayland` | GUI display |
 | `--socket=session-bus` | Session D-Bus (notifications, SNI) |
 | `--filesystem=host` | Read/write backup source folders anywhere on the host |
+| `--filesystem=host-os` | See host `/usr/bin` etc. at `/run/host/...` (find host jotta-cli/jottad) |
 | `--filesystem=xdg-run/jottad` | Access jottad's Unix socket |
+| `--talk-name=org.freedesktop.Flatpak` | `flatpak-spawn --host`: run jotta-cli/jottad on the host |
 | `--filesystem=xdg-config/autostart:ro` | Read autostart entries (launch-on-startup toggle) |
 | `--talk-name=org.freedesktop.Notifications` | Desktop notifications |
 | `--talk-name=org.kde.StatusNotifierWatcher` | KDE tray icon support |

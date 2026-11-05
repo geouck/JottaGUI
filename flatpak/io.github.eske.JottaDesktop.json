@@ -14,9 +14,11 @@
     "--socket=wayland",
     "--socket=session-bus",
     "--filesystem=host",
+    "--filesystem=host-os",
     "--filesystem=xdg-run/jottad",
     "--filesystem=xdg-config/autostart:ro",
     "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.Flatpak",
     "--talk-name=org.kde.StatusNotifierWatcher"
   ],
   "cleanup": [
