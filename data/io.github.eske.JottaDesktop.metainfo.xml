@@ -18,7 +18,7 @@
       host systemd daemon if one is already running).
     </p>
   </description>
-  <launchable type="desktop-id">jotta-desktop.desktop</launchable>
+  <launchable type="desktop-id">io.github.eske.JottaDesktop.desktop</launchable>
   <screenshots>
     <!-- TODO: add screenshots before Flathub submission -->
   </screenshots>

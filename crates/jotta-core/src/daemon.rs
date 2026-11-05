@@ -9,6 +9,7 @@
 //! ensure_running detects that and reuses it instead of spawning a second
 //! daemon (two daemons = double backups).
 
+use crate::cli::{host_view, running_in_flatpak};
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -48,12 +49,22 @@ impl DaemonSupervisor {
 
     /// Start jottad if it is not already running (e.g. host systemd unit).
     /// Idempotent. Returns whether *we* spawned it.
+    ///
+    /// Inside a Flatpak with a host-installed jottad, the daemon is spawned
+    /// **on the host** via `flatpak-spawn --host` (detached with nohup), because
+    /// a process started inside the sandbox would die with the sandbox and
+    /// host binaries may not be executable from the sandbox mounts. We then
+    /// do not track the child — a host daemon is never killed by us.
     pub fn ensure_running(&mut self) -> Result<bool> {
         if self.is_running() {
             return Ok(false);
         }
         std::fs::create_dir_all(self.socket.parent().unwrap())
             .map_err(|io| Error::Spawn("mkdir jottad run dir".into(), io))?;
+
+        if running_in_flatpak() && !self.binary.starts_with("/app") {
+            return self.ensure_running_on_host();
+        }
 
         let log = std::fs::OpenOptions::new()
             .create(true)
@@ -71,6 +82,37 @@ impl DaemonSupervisor {
         self.child = Some(child);
         self.wait_for_socket(Duration::from_secs(10))?;
         Ok(we_spawned)
+    }
+
+    /// Flatpak path: ask the host to start jottad detached
+    /// (`flatpak-spawn --host -- sh -c 'nohup <jottad> ... &'`), then wait for
+    /// the socket. The daemon keeps running on the host after we exit; we do
+    /// not keep a child handle, so `stop_if_owned` stays a no-op for it.
+    fn ensure_running_on_host(&mut self) -> Result<bool> {
+        let host_bin = host_view(&self.binary);
+        let script = format!(
+            "nohup '{}' >>'{}' 2>&1 &",
+            host_bin.display().to_string().replace('\'', "'\\''"),
+            self.log_file.display().to_string().replace('\'', "'\\''"),
+        );
+        let out = Command::new("flatpak-spawn")
+            .args(["--host", "--", "sh", "-c", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|io| Error::Spawn("flatpak-spawn".into(), io))?;
+        if !out.status.success() {
+            return Err(Error::Spawn(
+                "flatpak-spawn --host jottad".into(),
+                std::io::Error::other(format!(
+                    "exit code {}",
+                    out.status.code().unwrap_or(-1)
+                )),
+            ));
+        }
+        self.wait_for_socket(Duration::from_secs(15))?;
+        Ok(true)
     }
 
     /// Block until the socket shows up, or fail with Timeout.

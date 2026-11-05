@@ -83,9 +83,6 @@ fn main() {
          \x20   padding-top: 2px;\n\
          \x20   padding-bottom: 2px;\n\
          }\n\
-         windowcontrols {\n\
-         \x20   spacing: 2px;\n\
-         }\n\
          windowcontrols > button {\n\
          \x20   min-width: 16px;\n\
          \x20   min-height: 16px;\n\
@@ -184,7 +181,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         .default_width(800)
         .default_height(600)
         .title("Jotta Desktop")
-        .icon_name("jotta-desktop")
+        .icon_name("io.github.eske.JottaDesktop")
         .build();
 
     // Toast overlay for command feedback.
@@ -207,7 +204,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
-    sidebar.append(&nav_item("Status", "jotta-desktop-idle-symbolic"));
+    sidebar.append(&nav_item("Status", "io.github.eske.JottaDesktop-symbolic"));
     sidebar.append(&nav_item("Backup", "folder-symbolic"));
     sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
     sidebar.append(&nav_item("Overførsler", "emblem-downloads-symbolic"));
