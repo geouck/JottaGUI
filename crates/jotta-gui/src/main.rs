@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod login;
+
 /// Shared app state: latest parsed status + a channel to request refreshes.
 struct App {
     client: CliClient,
@@ -233,6 +235,30 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     daemon_banner.set_button_label(Some("Genindlæs"));
     daemon_banner.set_revealed(false);
 
+    // Login-række (iteration 11): synlig kun ved State::NeedsLogin.
+    // Knappen åbner den grafiske login-dialog, der føder jotta-cli login's
+    // tre prompts programmatisk (licens, token, enhedsnavn) — tokenet går
+    // kun over stdin, aldrig argv eller logs.
+    let login_row = adw::ActionRow::builder()
+        .title("Log ind")
+        .subtitle("Forbind denne enhed med din Jottacloud-konto")
+        .build();
+    let login_btn = gtk::Button::with_label("Log ind…");
+    login_btn.add_css_class("suggested-action");
+    login_btn.set_valign(gtk::Align::Center);
+    login_btn.set_visible(false);
+    login_row.add_suffix(&login_btn);
+    login_row.set_activatable_widget(Some(&login_btn));
+    {
+        let window = window.clone();
+        let toast_tx = toast_tx.clone();
+        login_btn.connect_clicked(move |_| {
+            if let Some(loc) = BinaryLocator::from_path() {
+                login::open_login_dialog(&window, loc, toast_tx.clone());
+            }
+        });
+    }
+
     let status_page = build_status_page(
         &status_state_label,
         &status_email_label,
@@ -240,6 +266,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &status_usage_label,
         &pause_switch,
         &daemon_banner,
+        &login_row,
     );
     stack.add_titled(&status_page, Some("status"), "Status");
 
@@ -1103,6 +1130,7 @@ Vil du erstatte den?",
         sync_count_row: sync_count_row.clone(),
         toast_tx: toast_tx.clone(),
         daemon_banner: daemon_banner.clone(),
+        login_row: login_row.clone(),
     };
 
     // --- Info page: fetch Jottacloud version once on a worker thread ---
@@ -1283,6 +1311,8 @@ struct StatusWidgets {
     toast_tx: std::sync::mpsc::Sender<String>,
     /// Banner vises når daemon ikke svarer (State::Offline).
     daemon_banner: adw::Banner,
+    /// Login-række vises kun ved State::NeedsLogin.
+    login_row: adw::ActionRow,
 }
 
 impl Clone for StatusWidgets {
@@ -1303,6 +1333,7 @@ impl Clone for StatusWidgets {
             sync_count_row: self.sync_count_row.clone(),
             toast_tx: self.toast_tx.clone(),
             daemon_banner: self.daemon_banner.clone(),
+            login_row: self.login_row.clone(),
         }
     }
 }
@@ -1320,6 +1351,10 @@ impl StatusWidgets {
             State::Idle => "Jottacloud: oppe at køre",
         };
         self.state_label.set_text(state_text);
+
+        // Login-række: kun ved NeedsLogin (polleren styrer synligheden).
+        self.login_row
+            .set_visible(matches!(status.state, State::NeedsLogin));
 
         // Daemon banner: vis når offline (jottad svarer ikke).
         // Én fejlmeddelelse — polleren viser ikke banner igen før næste offline.
@@ -1531,6 +1566,7 @@ fn build_status_page(
     usage_label: &gtk::Label,
     pause_switch: &gtk::Switch,
     daemon_banner: &adw::Banner,
+    login_row: &adw::ActionRow,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
@@ -1557,6 +1593,7 @@ fn build_status_page(
     email_label.add_css_class("dim-label");
     account_group.add(&state_row);
     account_group.add(&email_row);
+    account_group.add(login_row);
     box_.append(&account_group);
 
     // Pause/resume: positiv formulering — ON = automatisk aktiv.
