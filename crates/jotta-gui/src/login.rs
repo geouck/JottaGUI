@@ -168,32 +168,38 @@ pub fn open_login_dialog(
         token_row.connect_changed(move |_| update_btn(&b, &c, &t));
     }
 
-    login_btn.connect_clicked(move |_| {
-        // Token lever kun transient i denne closure — logges aldrig.
-        let token = token_row.text().to_string();
-        let device_raw = device_row.text().to_string();
-        let device = {
-            let t = device_raw.trim();
-            if t.is_empty() {
-                hostname()
-            } else {
-                t.to_string()
+    {
+        // connect_clicked tager &self — closure må ikke også flytte login_btn,
+        // så vi fanger en clone (btn) og bruger receiver uden at flytte den.
+        let btn = login_btn.clone();
+        login_btn.connect_clicked(move |_| {
+            // Token lever kun transient i denne closure — logges aldrig.
+            let token = token_row.text().to_string();
+            let device_raw = device_row.text().to_string();
+            let device = {
+                let t = device_raw.trim();
+                if t.is_empty() {
+                    hostname()
+                } else {
+                    t.to_string()
+                }
+            };
+            if !license_cb.is_active() || token.trim().is_empty() {
+                return;
             }
-        };
-        if !license_cb.is_active() || token.trim().is_empty() {
-            return;
-        }
-        login_btn.set_sensitive(false);
-        status_label.set_text("Kontakter jottad og logger ind…");
+            btn.set_sensitive(false);
+            status_label.set_text("Kontakter jottad og logger ind…");
 
-        let (ev_tx, ev_rx) = mpsc::channel::<LoginEvent>();
-        let ev_rx = Arc::new(Mutex::new(ev_rx));
-        std::thread::spawn(move || run_login(locator, token, device, ev_tx));
+            let (ev_tx, ev_rx) = mpsc::channel::<LoginEvent>();
+            let ev_rx = Arc::new(Mutex::new(ev_rx));
+            // Fn-closure kan fyres flere gange — clone locator pr. klik.
+            let loc = locator.clone();
+            std::thread::spawn(move || run_login(loc, token, device, ev_tx));
 
-        let dialog2 = dialog.clone();
-        let status_label2 = status_label.clone();
-        let login_btn2 = login_btn.clone();
-        let toast_tx2 = toast_tx.clone();
+            let dialog2 = dialog.clone();
+            let status_label2 = status_label.clone();
+            let login_btn2 = btn.clone();
+            let toast_tx2 = toast_tx.clone();
         glib::idle_add_local(move || {
             let rx = ev_rx.lock().unwrap();
             loop {
@@ -227,7 +233,8 @@ pub fn open_login_dialog(
                 }
             }
         });
-    });
+        });
+    }
 }
 
 /// Worker: spawn `jotta-cli login` (via the argv whitelist + flatpak-spawn
