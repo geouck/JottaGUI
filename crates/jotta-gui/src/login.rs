@@ -27,6 +27,7 @@ use gtk::prelude::*;
 use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
 use jotta_core::login::{self, LoginStep};
 use libadwaita as adw;
+use libadwaita::prelude::*;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,14 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "jotta-enhed".to_string())
 }
 
+/// GTK4's WidgetExt has no `set_margin_all` — set all four sides (samme helper som main.rs).
+fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
+    widget.set_margin_top(margin);
+    widget.set_margin_bottom(margin);
+    widget.set_margin_start(margin);
+    widget.set_margin_end(margin);
+}
+
 /// Open the login dialog. `locator` finds jotta-cli; `toast_tx` reports the result.
 pub fn open_login_dialog(
     window: &adw::ApplicationWindow,
@@ -70,7 +79,7 @@ pub fn open_login_dialog(
     toolbar.add_top_bar(&header);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    content.set_margin_all(18);
+    set_margin_all(&content, 18);
 
     let info = gtk::Label::new(Some(
         "Log ind med et personligt login-token. Generer tokenet under Security-fanen på jottacloud.com — tokenet er engangs og vises kun én gang.",
