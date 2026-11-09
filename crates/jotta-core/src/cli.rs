@@ -11,7 +11,7 @@
 use crate::error::{Error, Result};
 use crate::json::{self, Value};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// Where to find the jotta-cli/jottad binaries.
 #[derive(Debug, Clone)]
@@ -462,6 +462,31 @@ impl CliClient {
     /// Convenience: `status --json` parsed.
     pub fn status(&self) -> Result<Value> {
         self.run_json(&JottaCommand::Status)
+    }
+
+    /// Spawn a command with piped stdio, for interactive feeding (login).
+    /// Applies the same `flatpak-spawn --host` prefix as `run()`, so it works
+    /// identically native and inside a Flatpak. The caller owns the Child and
+    /// must `wait()` it (reaper rule). Arguments come from the `argv()`
+    /// whitelist only — no raw strings, and secrets never go into argv.
+    pub fn spawn_piped(&self, cmd: &JottaCommand) -> Result<Child> {
+        let argv = cmd.argv();
+        let prefix = host_spawn_prefix(&self.locator.cli);
+        let mut command = if prefix.is_empty() {
+            Command::new(&self.locator.cli)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        command
+            .args(&argv)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+            .spawn()
+            .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
     }
 }
 
