@@ -159,6 +159,9 @@ pub enum JottaCommand {
     SyncSetup(PathBuf),
     SyncStart,
     SyncStop,
+    /// `sync trigger` — én manuel sync-kørsel nu. Kun gyldig når kontinuerlig
+    /// (aktiv) sync IKKE er slået til (docs.jottacloud.com). Ikke-destruktiv.
+    SyncTrigger,
     /// `sync log -n <n>`
     SyncLog(usize),
     /// `ignores add --pattern <pat> [--backup NAME]` — BACKUP ignores only.
@@ -269,6 +272,7 @@ impl JottaCommand {
             }
             JottaCommand::SyncStart => push(&mut args, &["sync", "start"]),
             JottaCommand::SyncStop => push(&mut args, &["sync", "stop"]),
+            JottaCommand::SyncTrigger => push(&mut args, &["sync", "trigger"]),
             JottaCommand::SyncLog(n) => {
                 push(&mut args, &["sync", "log", "-n"]);
                 args.push(n.to_string());
@@ -518,6 +522,9 @@ mod tests {
             JottaCommand::IgnoreAdd { pattern: "**/node_modules".into(), backup: Some("Dev".into()) }.argv(),
             vec!["ignores", "add", "--pattern", "**/node_modules", "--backup", "Dev"]
         );
+        assert_eq!(JottaCommand::SyncStart.argv(), vec!["sync", "start"]);
+        assert_eq!(JottaCommand::SyncStop.argv(), vec!["sync", "stop"]);
+        assert_eq!(JottaCommand::SyncTrigger.argv(), vec!["sync", "trigger"]);
         assert_eq!(JottaCommand::SyncLog(20).argv(), vec!["sync", "log", "-n", "20"]);
         // Backup ignores: "ignores list" (NOT bare "ignores") — verified against
         // docs.jottacloud.com "Ignoring files and folders from backup".
