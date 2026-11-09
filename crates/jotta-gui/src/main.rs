@@ -44,11 +44,13 @@ impl App {
         }
     }
 
-    /// Poll `status --json` once; returns the parsed Status (Offline on error).
+    /// Poll `status --json` once; returns the parsed Status.
+    /// On error, "Not logged in" maps to NeedsLogin (daemon answered!),
+    /// anything else to Offline.
     fn poll(&self) -> Status {
         match self.client.status() {
             Ok(v) => Status::from_json(&v),
-            Err(_) => Status::default(),
+            Err(e) => Status::from_cli_error(&e),
         }
     }
 

@@ -234,6 +234,29 @@ impl Status {
         State::Idle
     }
 
+    /// Build a Status from a failed `status --json` run.
+    ///
+    /// When jottad is reachable but unauthenticated, jotta-cli exits 1 with
+    /// "ERROR  Not logged in" on stderr — that is **NeedsLogin, not Offline**
+    /// (the daemon answered!). Verified empirically (Pop!_OS, jotta-cli
+    /// 0.17.176206, 2026-11): without this, the GUI showed the
+    /// "daemon svarer ikke" banner on fresh installs.
+    pub fn from_cli_error(err: &crate::error::Error) -> Status {
+        use crate::error::Error;
+        let needs_login = match err {
+            Error::CommandFailed { stderr, .. } => {
+                stderr.to_lowercase().contains("not logged in")
+            }
+            _ => false,
+        };
+        let mut s = Status::default();
+        if needs_login {
+            s.logged_in = Some(false);
+            s.state = State::NeedsLogin;
+        }
+        s
+    }
+
     /// Human-readable one-liner for the tray tooltip.
     pub fn tooltip(&self) -> String {
         match self.state {
@@ -438,5 +461,36 @@ mod tests {
         assert_eq!(Status::format_bytes(1_500), "1,50 KB");
         assert_eq!(Status::format_bytes(16_993_271_698), "16,99 GB");
         assert_eq!(Status::format_bytes(5_000_000_000_000), "5,00 TB");
+    }
+
+    #[test]
+    fn cli_error_not_logged_in_maps_to_needs_login_not_offline() {
+        // jotta-cli status --json when jottad runs but user is not logged in:
+        // exit 1, "ERROR  Not logged in" on stderr (verified on Pop!_OS).
+        let err = crate::error::Error::CommandFailed {
+            program: "jotta-cli".into(),
+            argv: vec!["status".into(), "--json".into()],
+            code: 1,
+            stderr: "ERROR  Not logged in\n".into(),
+        };
+        let s = Status::from_cli_error(&err);
+        assert_eq!(s.state, State::NeedsLogin);
+        assert_eq!(s.logged_in, Some(false));
+
+        // Spawn failure (binary missing) stays Offline.
+        let err2 = crate::error::Error::Spawn(
+            "jotta-cli".into(),
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        );
+        assert_eq!(Status::from_cli_error(&err2).state, State::Offline);
+
+        // Other command failures (e.g. daemon socket gone) stay Offline.
+        let err3 = crate::error::Error::CommandFailed {
+            program: "jotta-cli".into(),
+            argv: vec!["status".into(), "--json".into()],
+            code: 1,
+            stderr: "ERROR  Could not connect to jottad\n".into(),
+        };
+        assert_eq!(Status::from_cli_error(&err3).state, State::Offline);
     }
 }
