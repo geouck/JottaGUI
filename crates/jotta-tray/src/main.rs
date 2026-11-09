@@ -372,7 +372,10 @@ fn main() {
             },
             Err(e) => {
                 let mut st = poll_state.lock().unwrap();
-                st.status = Status::default();
+                // "Not logged in" on stderr = NeedsLogin (daemon answered!),
+                // not Offline — otherwise the tray shows the wrong icon on
+                // fresh installs.
+                st.status = Status::from_cli_error(&e);
                 st.err = Some(e.to_string());
             }
         }
