@@ -48,7 +48,39 @@ sudo cp -r data/icons/hicolor /usr/share/icons/
 sudo gtk-update-icon-cache -f -t /usr/share/icons/hicolor
 ```
 
-If `jotta-cli`/`jottad` are not on PATH they are looked up next to the binary.
+### Debian / Ubuntu / Pop!_OS (apt, not dnf)
+
+```bash
+# Clone into your home dir — NO sudo needed for git:
+cd ~ && git clone https://github.com/geouck/JottaGUI && cd JottaGUI
+
+sudo apt update
+sudo apt install -y build-essential pkg-config git curl ca-certificates \
+  libgtk-4-dev libadwaita-1-dev libglib2.0-dev
+
+# apt's rustc is often too old for gtk4-rs 0.9 — use rustup instead:
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version   # needs >= 1.80
+
+cargo build --release -p jotta-gui -p jotta-tray
+cargo check -p jotta-gui    # must be 0 warnings
+cargo test  -p jotta-core
+# then the same sudo install / cp steps as above
+```
+
+### jotta-cli/jottad on Debian/Ubuntu/Pop!_OS
+
+```bash
+sudo curl -fsSL https://repo.jotta.cloud/jotta.gpg -o /usr/share/keyrings/jotta.gpg
+echo "deb [signed-by=/usr/share/keyrings/jotta.gpg] https://repo.jotta.cloud/debian debian main" \
+  | sudo tee /etc/apt/sources.list.d/jotta-cli.list
+sudo apt update && sudo apt install -y jotta-cli
+systemctl --user enable --now jottad.service
+```
+
+If `jotta-cli`/`jottad` are not on PATH they are looked up next to the binary
+(and, in a Flatpak, under `/run/host/...` / `~/.jottacloud/bin`).
 
 ## Build and run (dev)
 

@@ -87,6 +87,43 @@ flatpak-builder --user --install --force-clean build-dir flatpak/io.github.eske.
 flatpak run io.github.eske.JottaDesktop
 ```
 
+## Distributing a test bundle via GitHub Releases (testing only)
+
+A built app can be exported as a single-file bundle and shared as a GitHub
+Release asset. This is fine because the bundle contains ONLY our own code and
+icons — jotta-cli/jottad are NOT bundled (they stay host-installed and are run
+via `flatpak-spawn --host`). This is NOT the Flathub path: Flathub rejects
+host-dependent apps, so the official submission still needs the extra-data
+approach (TODO below).
+
+On the build machine (after `flatpak-builder --user --install ...`):
+
+```bash
+flatpak build-bundle ~/.local/share/flatpak/repo ~/JottaDesktop.flatpak \
+  io.github.eske.JottaDesktop x86_64 master
+# then upload ~/JottaDesktop.flatpak as an asset on a GitHub Release
+# (web UI: Releases -> Draft a new release -> attach file; or `gh release create`)
+```
+
+On the test machine (e.g. Pop!_OS):
+
+```bash
+sudo apt install -y flatpak flatpak-builder   # Pop!_OS usually has flatpak already
+flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.gnome.Platform//50   # the runtime is NOT in the bundle
+flatpak install --user ~/Downloads/JottaDesktop.flatpak
+flatpak run io.github.eske.JottaDesktop
+```
+
+The test machine still needs host-installed `jotta-cli`/`jottad` (the Flatpak
+runs them on the host via `flatpak-spawn --host`) — see the Debian repo
+instructions in the root README.md. On GNOME, the tray icon additionally needs
+the AppIndicator extension ("AppIndicator and KStatusNotifierItem Support").
+
+**Login testing rule (SPEC.md §2B):** the empirical `jotta-cli login` test
+mutates device credentials — run it ONLY in a VM/container, never on a daily
+driver machine.
+
 ## Regenerating cargo-sources.json
 
 When dependencies change (after `cargo update`):
