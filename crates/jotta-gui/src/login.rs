@@ -145,7 +145,9 @@ pub fn open_login_dialog(
 
     cancel_btn.connect_clicked({
         let dialog = dialog.clone();
-        move |_| dialog.close()
+        move |_| {
+            dialog.close(); // adw 0.7: close() -> bool, closure must return ()
+        }
     });
 
     // "Log ind" kun aktiv når vilkår er accepteret OG token er udfyldt.
