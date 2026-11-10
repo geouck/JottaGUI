@@ -24,6 +24,32 @@ mod pixmaps;
 struct AppState {
     status: Status,
     err: Option<String>,
+    /// Live transfer rates in bytes/s (iteration 14), from Total-Remaining deltas.
+    up_rate: u64,
+    down_rate: u64,
+}
+
+/// Sort/hvidt tray-ikon (iteration 14): læses fra samme settings.conf som GUI'en
+/// skriver (tray_icon_mono=true). Standard FRA (farvede tilstandsikoner).
+fn tray_mono() -> bool {
+    let path = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("tray_icon_mono="))
+                .map(|l| l.trim_end() == "tray_icon_mono=true")
+        })
+        .unwrap_or(false)
 }
 
 /// Localized one-line status for menu + tooltip (mirrors Status::tooltip,
@@ -49,7 +75,11 @@ struct JottaTray {
 }
 
 impl JottaTray {
-    fn icon_for(state: State) -> &'static str {
+    fn icon_for(state: State, mono: bool) -> &'static str {
+        // Sort/hvidt (mono) tilvalg (iteration 14): ét symbolic-ikon uanset tilstand.
+        if mono {
+            return "io.github.eske.JottaDesktop-symbolic";
+        }
         // App-id-named icons: flatpak only exports icons whose filename starts
         // with the app-id, and native installs ship both names, so these work
         // everywhere (the embedded pixmap is the ultimate fallback).
@@ -69,7 +99,7 @@ impl Tray for JottaTray {
     }
 
     fn icon_name(&self) -> String {
-        Self::icon_for(self.state.lock().unwrap().status.state).to_string()
+        Self::icon_for(self.state.lock().unwrap().status.state, tray_mono()).to_string()
     }
 
     fn icon_theme_path(&self) -> String {
@@ -89,8 +119,16 @@ impl Tray for JottaTray {
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         // Embed ARGB32 pixmap data so the tray icon is always visible,
         // even when the icon theme path is not found by the host.
+        // NB (iteration 14 fix): KDE/Plasma prefers the embedded IconPixmap over
+        // IconName, so the mono toggle (tray_icon_mono=true) must swap the PIXMAP
+        // too — changing only icon_name() has no visible effect. In mono mode we
+        // therefore return a desaturated (grayscale) variant of the state pixmap.
         let state = self.state.lock().unwrap().status.state;
-        pixmaps::icon_for_state(state)
+        if tray_mono() {
+            pixmaps::icon_for_state_mono(state)
+        } else {
+            pixmaps::icon_for_state(state)
+        }
     }
 
     fn title(&self) -> String {
@@ -115,7 +153,7 @@ impl Tray for JottaTray {
             None => status_line(&s.status),
         };
         ToolTip {
-            icon_name: Self::icon_for(s.status.state).to_string(),
+            icon_name: Self::icon_for(s.status.state, tray_mono()).to_string(),
             title: "Jotta Desktop".into(),
             description,
             ..Default::default()
@@ -126,14 +164,28 @@ impl Tray for JottaTray {
         let s = self.state.lock().unwrap();
         let quit = Arc::clone(&self.quit);
         let close_gui_on_quit = Arc::clone(&self.close_gui_on_quit);
-        vec![
-            StandardItem {
-                label: i18n::tf("tray.status", &[&status_line(&s.status)]),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
+        let mut items: Vec<MenuItem<Self>> = vec![StandardItem {
+            label: i18n::tf("tray.status", &[&status_line(&s.status)]),
+            enabled: false,
+            ..Default::default()
+        }
+        .into()];
+        // Live up/down-hastighed (iteration 14) — vises kun når der overføres noget.
+        if s.up_rate > 0 || s.down_rate > 0 {
+            items.push(
+                StandardItem {
+                    label: i18n::tf(
+                        "tray.speed",
+                        &[&i18n::format_rate(s.down_rate), &i18n::format_rate(s.up_rate)],
+                    ),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(MenuItem::Separator);
+        items.extend(vec![
             match s.status.paused {
                 Some(true) => StandardItem {
                     label: i18n::t("tray.resume").into(),
@@ -188,7 +240,8 @@ impl Tray for JottaTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -297,6 +350,30 @@ fn pid_alive_and_is_tray(pid: u32) -> bool {
 }
 
 fn main() {
+    // Verbose-flag efter samme kutyme som jotta-desktop: -v/--verbose (gentagelig),
+    // --verbose=N, --debug, -q/--quiet, ellers JOTTA_DESKTOP_VERBOSE. GUI'en giver
+    // niveauet videre når den spawner tray'en.
+    let mut level: u8 = std::env::var("JOTTA_DESKTOP_VERBOSE")
+        .ok()
+        .and_then(|v| jotta_core::parse_verbose(&v))
+        .unwrap_or(0);
+    for a in std::env::args().skip(1) {
+        if let Some(v) = a.strip_prefix("--verbose=") {
+            if let Some(l) = jotta_core::parse_verbose(v) {
+                level = l;
+            }
+        } else {
+            match a.as_str() {
+                "-v" | "--verbose" => level = (level + 1).min(3),
+                "--debug" => level = level.max(3),
+                "-q" | "--quiet" => level = 0,
+                _ => {}
+            }
+        }
+    }
+    jotta_core::set_verbose(level);
+    jotta_core::vlog!(1, "jotta-tray starter, verbose={level}");
+
     // Single-instance: skriv PID-fil og afslut hvis en anden tray allerede kører.
     let pid_file = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -348,7 +425,7 @@ fn main() {
         Err(e) => eprintln!("jotta-tray: {e}"),
     }
 
-    let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None }));
+    let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None, up_rate: 0, down_rate: 0 }));
     let quit = Arc::new(AtomicBool::new(false));
 
     // Minimize-to-tray: læs fra samme konfigurationsfil som GUI'en.
@@ -389,7 +466,10 @@ fn main() {
     let poll_handle = handle.clone();
     let poll_client = CliClient::new(locator.clone());
     let poll_quit = Arc::clone(&quit);
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        // Sidste sample til hastighedsberegning (kun denne tråd rører den).
+        let mut last: Option<(std::time::Instant, u64, u64)> = None;
+        loop {
         if poll_quit.load(Ordering::SeqCst) {
             break;
         }
@@ -414,8 +494,93 @@ fn main() {
                 st.err = Some(e.to_string());
             }
         }
+        // Live up/down-hastighed (iteration 14+, forbedret efter PR #20-test):
+        // PRIMÆRT fra State.Uploading/Downloading i status --json — det er den
+        // eneste kilde der også viser sync-triggerede overførsler med filsti og
+        // byte-tællere. FALLBACK: list uploads/downloads --json (Total-Remaining).
+        // SUPPLEMENT: TEKST-status `> Uploads: n (bytes) / n (bytes)` viser også
+        // byte-fremskridt mens sync arbejder, hvor JSON kun har tomme {}.
+        // Hastighed = delta(overførte bytes) / delta(tid) mellem polls.
+        let (mut up_done, mut down_done) = {
+            let st = poll_state.lock().unwrap();
+            let s = &st.status;
+            if s.active_transfers_have_byte_counters() {
+                (s.active_upload_bytes_done(), s.active_download_bytes_done())
+            } else {
+                let up = poll_client
+                    .run_json(&JottaCommand::ListUploads)
+                    .ok()
+                    .map(|v| {
+                        jotta_core::remote::total_bytes_done_uploads(&jotta_core::remote::parse_uploads_json(&v))
+                    })
+                    .unwrap_or(0);
+                let down = poll_client
+                    .run_json(&JottaCommand::ListDownloads)
+                    .ok()
+                    .map(|v| {
+                        jotta_core::remote::total_bytes_done_downloads(&jotta_core::remote::parse_downloads_json(&v))
+                    })
+                    .unwrap_or(0);
+                (up, down)
+            }
+        };
+        // Tekst-status `jotta-cli status` (ikke --json): `> Uploads:`/`> Downloads:`
+        // byte-tællere — tændt mens sync kører selv når JSON-Uploading er tom.
+        if let Ok(text) = poll_client.run_text(&JottaCommand::StatusText) {
+            let prog = jotta_core::textstatus::parse_status_text_progress(&text);
+            up_done = up_done.max(jotta_core::textstatus::done_bytes_for(&prog, "upload"));
+            down_done = down_done.max(jotta_core::textstatus::done_bytes_for(&prog, "download"));
+        }
+        // Sync.WorkingProgress (verificeret mid-sync i status --json:
+        // CompletedUpload/TotalUpload {Files,Bytes}) — den eneste byte-tæller i
+        // JSON for sync-overførsler mens State.Uploading står {}.
+        {
+            let st = poll_state.lock().unwrap();
+            up_done = up_done.max(st.status.sync_upload_bytes_done().unwrap_or(0));
+            down_done = down_done.max(st.status.sync_download_bytes_done().unwrap_or(0));
+        }
+        {
+            let now = std::time::Instant::now();
+            let (up_rate, down_rate) = match last {
+                Some((t, pu, pd)) => {
+                    let dt = now.duration_since(t).as_secs_f64();
+                    if dt > 0.0 {
+                        (
+                            (up_done.saturating_sub(pu) as f64 / dt) as u64,
+                            (down_done.saturating_sub(pd) as f64 / dt) as u64,
+                        )
+                    } else {
+                        (0, 0)
+                    }
+                }
+                None => (0, 0),
+            };
+            last = Some((now, up_done, down_done));
+            jotta_core::vlog!(
+                1,
+                "tray poll: up_done={} down_done={} rate={}B/s/{}B/s",
+                up_done,
+                down_done,
+                up_rate,
+                down_rate
+            );
+            let mut st = poll_state.lock().unwrap();
+            st.up_rate = up_rate;
+            st.down_rate = down_rate;
+            jotta_core::vlog!(
+                2,
+                "tray state: {:?} sync_working={} wp=({:?},{:?}) active_up={} active_down={}",
+                st.status.state,
+                st.status.sync_working,
+                st.status.sync_upload_bytes_done(),
+                st.status.sync_download_bytes_done(),
+                st.status.active_uploads.len(),
+                st.status.active_downloads.len()
+            );
+        }
         poll_handle.update(|_tray| {});
         std::thread::sleep(Duration::from_secs(3));
+        }
     });
 
     // Main thread: wait for a quit request from the menu, then shut down cleanly.

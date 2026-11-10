@@ -49,6 +49,7 @@ pub fn lang() -> Lang {
 fn catalog(key: &str) -> (&'static str, &'static str) {
     match key {
         "tray.status" => ("Status: {}", "Status: {}"),
+        "tray.speed" => ("↓ {} · ↑ {}", "↓ {} · ↑ {}"),
         "tray.error" => ("Fejl: {}", "Error: {}"),
         "tray.pause" => ("Pause", "Pause"),
         "tray.resume" => ("Genoptag", "Resume"),
@@ -89,6 +90,31 @@ pub fn tf(key: &str, args: &[&dyn std::fmt::Display]) -> String {
     out
 }
 
+fn format_bytes_lang(n: u64, l: Lang) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut val = n as f64;
+    let mut unit = 0;
+    while val >= 1000.0 && unit < UNITS.len() - 1 {
+        val /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        let rounded = format!("{val:.2}");
+        let sep = match l {
+            Lang::Da => ",",
+            Lang::En => ".",
+        };
+        format!("{} {}", rounded.replace('.', sep), UNITS[unit])
+    }
+}
+
+/// Locale-aware transfer rate ("1,58 MB/s" da / "1.58 MB/s" en) — iteration 14.
+pub fn format_rate(bytes_per_sec: u64) -> String {
+    format!("{}/s", format_bytes_lang(bytes_per_sec, lang()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +133,13 @@ mod tests {
         assert_eq!((da, en), ("Genoptag", "Resume"));
         let (da, en) = catalog("tray.quit");
         assert_eq!((da, en), ("Afslut", "Quit"));
+    }
+
+    #[test]
+    fn format_rate_locale() {
+        assert_eq!(format_bytes_lang(1580000000, Lang::Da), "1,58 GB");
+        // format_rate uses process lang; just check the /s suffix shape via format_bytes_lang
+        assert!(format!("{}/s", format_bytes_lang(1500, Lang::En)).ends_with("/s"));
     }
 
     #[test]

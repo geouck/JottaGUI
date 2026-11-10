@@ -216,6 +216,29 @@ pub enum JottaCommand {
     /// Expected to have `--json` (same pattern as `list downloads --json`).
     /// Verified: `jotta-cli list --help` shows `uploads` subcommand.
     ListUploads,
+    /// `observe --help` — run once to detect whether `observe` supports `--json`
+    /// (see `observe::observe_help_supports_json`). Read-only.
+    ObserveHelp,
+    /// `observe --json` — long-lived read-only event stream of ongoing
+    /// uploads/downloads (the CLI's own live view). Only spawned when
+    /// `ObserveHelp` advertised `--json`; read stdout line by line and kill
+    /// the child on shutdown (see `CliClient::spawn_stream`).
+    ObserveJson,
+    /// `status` (plain text, NO --json) — while sync is working it prints
+    /// `> Uploads : n (bytes) / n (bytes)` working-progress lines that the
+    /// JSON form hides behind an empty object. Parsed by
+    /// `textstatus::parse_status_text_progress` for live byte counters.
+    /// Read-only.
+    StatusText,
+    /// `sync --help` — run once to detect whether the `sync log` subcommand
+    /// exists (see `synclog::sync_help_lists_log`). Read-only.
+    SyncHelp,
+    /// `sync log --watch` — long-lived read-only stream of sync events
+    /// (`2026-01-20 20:10:22 +0100 CET :: Upload /path/file`), the only CLI
+    /// source that NAMES the file currently syncing. Spawn with
+    /// `spawn_stream`, parse with `synclog::parse_sync_log_line`, kill the
+    /// child on shutdown.
+    SyncLogWatch,
     /// `list downloaderrors [--downloadid=<id>] [--json]` — error details
     /// for failed downloads. With no filter, lists all download errors.
     ListDownloadErrors { download_id: Option<String>, json: bool },
@@ -347,6 +370,11 @@ impl JottaCommand {
             }
             JottaCommand::ListDownloads => push(&mut args, &["list", "downloads", "--json"]),
             JottaCommand::ListUploads => push(&mut args, &["list", "uploads", "--json"]),
+            JottaCommand::ObserveHelp => push(&mut args, &["observe", "--help"]),
+            JottaCommand::ObserveJson => push(&mut args, &["observe", "--json"]),
+            JottaCommand::StatusText => push(&mut args, &["status"]),
+            JottaCommand::SyncHelp => push(&mut args, &["sync", "--help"]),
+            JottaCommand::SyncLogWatch => push(&mut args, &["sync", "log", "--watch"]),
             JottaCommand::ListDownloadInfo { download_id, json } => {
                 push(&mut args, &["list", "downloadinfo"]);
                 args.push(format!("--downloadid={download_id}"));
@@ -435,11 +463,21 @@ impl CliClient {
             c.args(&prefix[1..]);
             c
         };
+        crate::vlog!(2, "run: {} {:?}", self.locator.cli.display(), argv);
         let out = command
             .args(&argv)
             .stdin(Stdio::null())
             .output()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))?;
+        crate::vlog!(
+            3,
+            "run: {} {:?} -> exit={} stdout={}B stderr={}B",
+            self.locator.cli.display(),
+            argv,
+            out.status.code().unwrap_or(-1),
+            out.stdout.len(),
+            out.stderr.len()
+        );
 
         if !out.status.success() {
             let code = out.status.code().unwrap_or(-1);
@@ -497,9 +535,92 @@ impl CliClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::vlog!(2, "spawn piped: {} {:?}", self.locator.cli.display(), argv);
         command
             .spawn()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
+    }
+
+    /// Spawn a LONG-LIVED read-only command with stdout piped, for streaming
+    /// output such as `observe --json` (see `JottaCommand::ObserveJson`).
+    /// Same flatpak-spawn prefix as `run()`. The caller reads stdout line by
+    /// line, and MUST kill the child on shutdown (store it and `kill()` before
+    /// exiting, then `wait()` to reap). Only whitelisted argv — read-only.
+    pub fn spawn_stream(&self, cmd: &JottaCommand) -> Result<Child> {
+        let argv = cmd.argv();
+        let prefix = host_spawn_prefix(&self.locator.cli);
+        let mut command = if prefix.is_empty() {
+            Command::new(&self.locator.cli)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        command
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        crate::vlog!(2, "spawn stream: {} {:?}", self.locator.cli.display(), argv);
+        command
+            .spawn()
+            .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
+    }
+
+    /// True when `script(1)` (util-linux) is available — needed to give
+    /// `jotta-cli observe` the pseudo-TTY it requires for its TUI, whose
+    /// screen we then parse with `observe::TuiScreen` (jotta-cli 0.17.x has
+    /// NO `observe --json`; verified: `unknown flag: --json`).
+    pub fn observe_tui_available() -> bool {
+        find_binary("script", "SCRIPT_BIN").is_some()
+    }
+
+    /// Spawn `jotta-cli observe` (both directions) under `script(1)` so it gets
+    /// a pseudo-TTY and renders its live TUI to stdout, which the caller reads
+    /// in raw chunks and feeds into `observe::TuiScreen`. Read-only; the
+    /// caller MUST kill the child on shutdown and `wait()` to reap.
+    ///
+    /// Inside a Flatpak the whole `script` invocation runs on the host via
+    /// `flatpak-spawn --host` (same mechanism as `run()`), and the inner
+    /// `jotta-cli observe` uses the host-view path of our cli binary.
+    pub fn spawn_observe_tui(&self) -> Result<Child> {
+        let script = find_binary("script", "SCRIPT_BIN").ok_or_else(|| {
+            Error::Spawn(
+                "script".into(),
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "script(1) not found — install util-linux-script",
+                ),
+            )
+        })?;
+        let cli_host = host_view(&self.locator.cli);
+        // Single-quote the path for the inner `sh -c` that script runs.
+        let inner = format!(
+            "'{}' observe",
+            cli_host.display().to_string().replace('\'', "'\\''")
+        );
+        let prefix = host_spawn_prefix(&script);
+        let mut command = if prefix.is_empty() {
+            Command::new(&script)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        command
+            .args(["-q", "-e", "-c"])
+            .arg(&inner)
+            .arg("/dev/null")
+            // stdin PIPED (ikke null): nogle util-linux script-versioner stopper
+            // når stdin når EOF — med et pipe holdes den åben så længe vi lever,
+            // så observe-TUI'en bliver ved med at streame til os.
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        crate::vlog!(2, "spawn observe TUI: {} -qec {:?} /dev/null", script.display(), inner);
+        command
+            .spawn()
+            .map_err(|io| Error::Spawn(script.display().to_string(), io))
     }
 }
 
@@ -568,6 +689,11 @@ mod tests {
         assert_eq!(JottaCommand::SyncStop.argv(), vec!["sync", "stop"]);
         assert_eq!(JottaCommand::SyncTrigger.argv(), vec!["sync", "trigger"]);
         assert_eq!(JottaCommand::SyncLog(20).argv(), vec!["sync", "log", "-n", "20"]);
+        assert_eq!(JottaCommand::StatusText.argv(), vec!["status"]);
+        assert_eq!(JottaCommand::SyncHelp.argv(), vec!["sync", "--help"]);
+        assert_eq!(JottaCommand::SyncLogWatch.argv(), vec!["sync", "log", "--watch"]);
+        assert!(!JottaCommand::StatusText.is_json());
+        assert!(!JottaCommand::SyncLogWatch.is_json());
         // Backup ignores: "ignores list" (NOT bare "ignores") — verified against
         // docs.jottacloud.com "Ignoring files and folders from backup".
         assert_eq!(

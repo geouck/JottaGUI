@@ -174,6 +174,20 @@ pub struct DownloadEntry {
     /// VERIFICeret (Fedora, 2026): `list downloaderrors` KRÆVER --downloadid,
     /// så vi udleder fejlbeskeder direkte fra hver download-entry.
     pub errors: Vec<String>,
+    /// Total bytes to transfer ("Total" key); None if absent.
+    pub total_bytes: Option<u64>,
+    /// Remaining bytes ("Remaining" key); None if absent/empty object.
+    pub remaining_bytes: Option<u64>,
+}
+
+impl DownloadEntry {
+    /// Bytes already transferred (Total - Remaining); None if counters absent.
+    pub fn bytes_done(&self) -> Option<u64> {
+        match (self.total_bytes, self.remaining_bytes) {
+            (Some(t), Some(r)) => Some(t.saturating_sub(r)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,12 +286,19 @@ pub fn parse_downloads_json(v: &Value) -> Vec<DownloadEntry> {
             // udleder fejlbeskeder direkte fra hver entry's "Errors" felt.
             let errors = extract_error_messages(item);
 
+            // Byte counters for live speed (iteration 14): "Total"/"Remaining",
+            // tolerant of empty objects ({} -> None).
+            let total_bytes = as_u64_ci(item, "Total").or_else(|| as_u64_ci(item, "total"));
+            let remaining_bytes = as_u64_ci(item, "Remaining").or_else(|| as_u64_ci(item, "remaining"));
+
             Some(DownloadEntry {
                 id,
                 remote_path,
                 local_dest,
                 status,
                 errors,
+                total_bytes,
+                remaining_bytes,
             })
         })
         .collect()
@@ -302,6 +323,31 @@ pub struct UploadEntry {
     /// VERIFICeret (Fedora, 2026): `list uploaderrors` KRÆVER --uploadid,
     /// så vi udleder fejlbeskeder direkte fra hver upload-entry.
     pub errors: Vec<String>,
+    /// Total bytes to transfer ("Total" key); None if absent.
+    pub total_bytes: Option<u64>,
+    /// Remaining bytes ("Remaining" key); None if absent/empty object.
+    pub remaining_bytes: Option<u64>,
+}
+
+impl UploadEntry {
+    /// Bytes already transferred (Total - Remaining); None if counters absent.
+    pub fn bytes_done(&self) -> Option<u64> {
+        match (self.total_bytes, self.remaining_bytes) {
+            (Some(t), Some(r)) => Some(t.saturating_sub(r)),
+            _ => None,
+        }
+    }
+}
+
+/// Sum of bytes already transferred across entries (missing counters = 0).
+/// Used to derive live up/down speed from deltas between polls.
+pub fn total_bytes_done_uploads(entries: &[UploadEntry]) -> u64 {
+    entries.iter().map(|e| e.bytes_done().unwrap_or(0)).sum()
+}
+
+/// Sum of bytes already transferred across downloads (missing counters = 0).
+pub fn total_bytes_done_downloads(entries: &[DownloadEntry]) -> u64 {
+    entries.iter().map(|e| e.bytes_done().unwrap_or(0)).sum()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,12 +430,19 @@ pub fn parse_uploads_json(v: &Value) -> Vec<UploadEntry> {
 
             let errors = extract_error_messages(item);
 
+            // Byte counters for live speed (iteration 14): "Total"/"Remaining",
+            // tolerant of empty objects ({} -> None).
+            let total_bytes = as_u64_ci(item, "Total").or_else(|| as_u64_ci(item, "total"));
+            let remaining_bytes = as_u64_ci(item, "Remaining").or_else(|| as_u64_ci(item, "remaining"));
+
             Some(UploadEntry {
                 id,
                 remote_path,
                 local_path,
                 status,
                 errors,
+                total_bytes,
+                remaining_bytes,
             })
         })
         .collect()
@@ -944,6 +997,29 @@ mod tests {
         // når der ikke er nogen uploads.
         let v = json::parse(r#"{}"#).unwrap();
         assert!(parse_uploads_json(&v).is_empty());
+    }
+
+    #[test]
+    fn parses_transfer_byte_counters() {
+        // Total/Remaining drive the live up/down speed (iteration 14).
+        let v = json::parse(r#"[
+            {"Id": "d1", "Remote": "Backup/Laptop/a.txt", "Local": "/tmp/a.txt", "Total": 1000, "Remaining": 250},
+            {"Id": "d2", "Remote": "Backup/Laptop/b.txt", "Local": "/tmp/b.txt", "Total": {}, "Remaining": {}}
+        ]"#).unwrap();
+        let ds = parse_downloads_json(&v);
+        assert_eq!(ds.len(), 2);
+        assert_eq!(ds[0].total_bytes, Some(1000));
+        assert_eq!(ds[0].remaining_bytes, Some(250));
+        assert_eq!(ds[0].bytes_done(), Some(750));
+        assert_eq!(ds[1].bytes_done(), None); // empty objects -> None
+        assert_eq!(total_bytes_done_downloads(&ds), 750);
+
+        let v = json::parse(r#"[
+            {"Id": "u1", "Remote": "Backup/Laptop/c.txt", "Local": "/home/x/c.txt", "Total": 2000, "Remaining": 500}
+        ]"#).unwrap();
+        let us = parse_uploads_json(&v);
+        assert_eq!(us[0].bytes_done(), Some(1500));
+        assert_eq!(total_bytes_done_uploads(&us), 1500);
     }
 
     #[test]
