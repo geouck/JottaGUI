@@ -470,17 +470,35 @@ fn main() {
                 st.err = Some(e.to_string());
             }
         }
-        // Live up/down-hastighed (iteration 14): to ekstra CLI-kald (jottad cacher
-        // svarene); hastighed = delta(overførte bytes) / delta(tid) mellem polls.
-        let up_done = poll_client
-            .run_json(&JottaCommand::ListUploads)
-            .ok()
-            .map(|v| jotta_core::remote::total_bytes_done_uploads(&jotta_core::remote::parse_uploads_json(&v)));
-        let down_done = poll_client
-            .run_json(&JottaCommand::ListDownloads)
-            .ok()
-            .map(|v| jotta_core::remote::total_bytes_done_downloads(&jotta_core::remote::parse_downloads_json(&v)));
-        if let (Some(up_done), Some(down_done)) = (up_done, down_done) {
+        // Live up/down-hastighed (iteration 14+, forbedret efter PR #20-test):
+        // PRIMÆRT fra State.Uploading/Downloading i status --json — det er den
+        // eneste kilde der også viser sync-triggerede overførsler med filsti og
+        // byte-tællere. FALLBACK: list uploads/downloads --json (Total-Remaining).
+        // Hastighed = delta(overførte bytes) / delta(tid) mellem polls.
+        let (up_done, down_done) = {
+            let st = poll_state.lock().unwrap();
+            let s = &st.status;
+            if s.active_transfers_have_byte_counters() {
+                (s.active_upload_bytes_done(), s.active_download_bytes_done())
+            } else {
+                let up = poll_client
+                    .run_json(&JottaCommand::ListUploads)
+                    .ok()
+                    .map(|v| {
+                        jotta_core::remote::total_bytes_done_uploads(&jotta_core::remote::parse_uploads_json(&v))
+                    })
+                    .unwrap_or(0);
+                let down = poll_client
+                    .run_json(&JottaCommand::ListDownloads)
+                    .ok()
+                    .map(|v| {
+                        jotta_core::remote::total_bytes_done_downloads(&jotta_core::remote::parse_downloads_json(&v))
+                    })
+                    .unwrap_or(0);
+                (up, down)
+            }
+        };
+        {
             let now = std::time::Instant::now();
             let (up_rate, down_rate) = match last {
                 Some((t, pu, pd)) => {

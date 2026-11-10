@@ -25,6 +25,11 @@ pub struct Status {
     pub bytes_quota: Option<u64>,
     /// Number of active transfers, if reported.
     pub active_transfers: Option<u64>,
+    /// In-flight uploads with detail (path/bytes) from `State.Uploading`
+    /// (iteration 14+: source for "current file" + live speed).
+    pub active_uploads: Vec<ActiveTransfer>,
+    /// In-flight downloads with detail from `State.Downloading`.
+    pub active_downloads: Vec<ActiveTransfer>,
     /// Backup folders configured on this device.
     pub backups: Vec<BackupFolder>,
     /// Sync folder state, if a sync is configured.
@@ -61,6 +66,72 @@ pub struct SyncInfo {
     pub root_path: Option<String>,
     pub files: Option<u64>,
     pub bytes: Option<u64>,
+}
+
+/// One in-flight transfer as reported inside `State.Uploading` / `State.Downloading`
+/// in `status --json` (objects keyed by transfer id; values may carry path and
+/// byte counters — schema undocumented, so every field is optional).
+///
+/// This is the best source for "which file is being transferred right now" and
+/// for live speed (delta of `bytes_done` between polls), because `list uploads`
+/// does not reliably show sync-triggered transfers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveTransfer {
+    pub path: Option<String>,
+    /// Bytes already transferred, if reported.
+    pub bytes_done: Option<u64>,
+    /// Total bytes of the transfer, if reported.
+    pub total_bytes: Option<u64>,
+}
+
+/// Parse the `State.Uploading` / `State.Downloading` value into active transfers.
+/// Tolerates object-keyed-by-id, bare arrays, and one level of nesting.
+fn parse_active_transfers(v: Option<&Value>) -> Vec<ActiveTransfer> {
+    fn from_obj(obj: &Value, depth: usize) -> Option<ActiveTransfer> {
+        let path = ["Path", "Remote", "Local", "File", "FilePath", "Name", "Source", "Destination"]
+            .iter()
+            .find_map(|k| obj.as_str_ci(k))
+            .map(str::to_owned);
+        let bytes_done = [
+            "BytesDone", "Done", "Uploaded", "Downloaded", "Transferred", "BytesTransferred", "Bytes",
+            "Progress",
+        ]
+        .iter()
+        .find_map(|k| obj.as_u64_ci(k));
+        let total = ["TotalBytes", "Total", "Size", "FileSize", "TotalSize"]
+            .iter()
+            .find_map(|k| obj.as_u64_ci(k));
+        if path.is_some() || bytes_done.is_some() || total.is_some() {
+            return Some(ActiveTransfer {
+                path,
+                bytes_done,
+                total_bytes: total,
+            });
+        }
+        // One level of nesting fallback (e.g. {"u1": {"transfer": {...}}}).
+        if depth == 0 {
+            if let Value::Object(map) = obj {
+                for val in map.values() {
+                    if let Value::Object(_) = val {
+                        if let Some(t) = from_obj(val, 1) {
+                            return Some(t);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    let Some(v) = v else { return Vec::new() };
+    let items: Vec<&Value> = match v {
+        Value::Object(map) => map.values().collect(),
+        Value::Array(arr) => arr.iter().collect(),
+        _ => return Vec::new(),
+    };
+    items.iter().filter_map(|item| match item {
+        Value::Object(_) => from_obj(item, 0),
+        _ => None,
+    }).collect()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -139,6 +210,22 @@ impl Status {
                     .and_then(|x| x.as_array())
                     .map(|a| a.len() as u64)
             });
+
+        // Active transfer detail (iteration 14+): State.Uploading / State.Downloading
+        // objects, keyed by transfer id. Case-tolerant lookup; empty = idle.
+        let state_ci = v.get_ci("State");
+        s.active_uploads = parse_active_transfers(
+            state_ci
+                .and_then(|st| st.get_ci("Uploading"))
+                .or_else(|| v.get_ci("Uploading"))
+                .or_else(|| v.get_ci("uploads")),
+        );
+        s.active_downloads = parse_active_transfers(
+            state_ci
+                .and_then(|st| st.get_ci("Downloading"))
+                .or_else(|| v.get_ci("Downloading"))
+                .or_else(|| v.get_ci("downloads")),
+        );
 
         // Backup folders (verified schema: Backup.State.Enabled.Backups[]).
         if let Some(arr) = v
@@ -232,6 +319,28 @@ impl Status {
             return State::Syncing;
         }
         State::Idle
+    }
+
+    /// Sum of bytes_done across active uploads (0 when counters are absent).
+    pub fn active_upload_bytes_done(&self) -> u64 {
+        self.active_uploads.iter().filter_map(|t| t.bytes_done).sum()
+    }
+
+    /// Sum of bytes_done across active downloads (0 when counters are absent).
+    pub fn active_download_bytes_done(&self) -> u64 {
+        self.active_downloads.iter().filter_map(|t| t.bytes_done).sum()
+    }
+
+    /// True when status reports in-flight transfers at all.
+    pub fn has_active_transfers(&self) -> bool {
+        !self.active_uploads.is_empty() || !self.active_downloads.is_empty()
+    }
+
+    /// True when at least one active transfer carries byte counters — then
+    /// active_*_bytes_done() is a usable speed source (delta between polls).
+    pub fn active_transfers_have_byte_counters(&self) -> bool {
+        self.active_uploads.iter().any(|t| t.bytes_done.is_some())
+            || self.active_downloads.iter().any(|t| t.bytes_done.is_some())
     }
 
     /// Build a Status from a failed `status --json` run.
@@ -492,5 +601,69 @@ mod tests {
             stderr: "ERROR  Could not connect to jottad\n".into(),
         };
         assert_eq!(Status::from_cli_error(&err3).state, State::Offline);
+    }
+
+    #[test]
+    fn parses_active_transfers_from_state_uploading_downloading() {
+        // Object keyed by transfer id, values carry path + byte counters.
+        let v = json::parse(
+            r#"{
+                "State": {
+                    "Uploading": {"u-1": {"Path": "/sync/jotta-gui tests/a.deb", "Bytes": 34, "Total": 142}},
+                    "Downloading": {"d-1": {"remote": "/Sync/b.txt", "bytes_done": 5, "total_bytes": 10}}
+                }
+            }"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.active_uploads.len(), 1);
+        assert_eq!(s.active_uploads[0].path.as_deref(), Some("/sync/jotta-gui tests/a.deb"));
+        assert_eq!(s.active_uploads[0].bytes_done, Some(34));
+        assert_eq!(s.active_uploads[0].total_bytes, Some(142));
+        assert_eq!(s.active_downloads.len(), 1);
+        assert_eq!(s.active_downloads[0].path.as_deref(), Some("/Sync/b.txt"));
+        assert_eq!(s.active_downloads[0].bytes_done, Some(5));
+        assert_eq!(s.active_downloads[0].total_bytes, Some(10));
+        assert!(s.has_active_transfers());
+        assert!(s.active_transfers_have_byte_counters());
+        assert_eq!(s.active_upload_bytes_done(), 34);
+        assert_eq!(s.active_download_bytes_done(), 5);
+        // Count still derived from the same objects.
+        assert_eq!(s.active_transfers, Some(1));
+        assert_eq!(s.state, State::Offline); // not logged in in this sample
+    }
+
+    #[test]
+    fn active_transfers_tolerate_arrays_scalars_and_empty() {
+        // Array shape.
+        let v = json::parse(r#"{"State": {"Uploading": [{"Path": "/x", "Bytes": 1, "Total": 2}]}}"#).unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.active_uploads.len(), 1);
+        assert_eq!(s.active_uploads[0].path.as_deref(), Some("/x"));
+
+        // Scalar values (id -> true) carry no detail: skipped, but count remains.
+        let v = json::parse(r#"{"State": {"Uploading": {"u-9": true}, "Downloading": {}}}"#).unwrap();
+        let s = Status::from_json(&v);
+        assert!(s.active_uploads.is_empty());
+        assert!(s.active_downloads.is_empty());
+        assert!(!s.has_active_transfers());
+        assert!(!s.active_transfers_have_byte_counters());
+        assert_eq!(s.active_transfers, Some(1));
+
+        // Empty objects = idle.
+        let v = json::parse(r#"{"State": {"Uploading": {}, "Downloading": {}}}"#).unwrap();
+        let s = Status::from_json(&v);
+        assert!(!s.has_active_transfers());
+        assert_eq!(s.active_transfers, Some(0));
+
+        // One level of nesting.
+        let v = json::parse(
+            r#"{"State": {"Downloading": {"d-1": {"transfer": {"Local": "/tmp/f", "Done": 7, "Total": 9}}}}}"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.active_downloads.len(), 1);
+        assert_eq!(s.active_downloads[0].path.as_deref(), Some("/tmp/f"));
+        assert_eq!(s.active_downloads[0].bytes_done, Some(7));
     }
 }

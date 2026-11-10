@@ -57,6 +57,36 @@ impl Value {
         Some(cur)
     }
 
+    /// Case-insensitive object key lookup that also ignores `_`/`-`.
+    /// jotta-cli's JSON naming is inconsistent between commands/releases
+    /// (`BytesDone` vs `bytes_done` vs `bytes-done`), so parsers must use this
+    /// instead of `get()` for any key that is not verified verbatim.
+    pub fn get_ci(&self, key: &str) -> Option<&Value> {
+        if let Value::Object(map) = self {
+            if let Some(val) = map.get(key) {
+                return Some(val);
+            }
+            let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect::<String>();
+            let want = norm(key);
+            for (k, val) in map {
+                if norm(k) == want {
+                    return Some(val);
+                }
+            }
+        }
+        None
+    }
+
+    /// Case-insensitive numeric field read.
+    pub fn as_u64_ci(&self, key: &str) -> Option<u64> {
+        self.get_ci(key).and_then(|x| x.as_f64()).map(|n| n as u64)
+    }
+
+    /// Case-insensitive string field read.
+    pub fn as_str_ci(&self, key: &str) -> Option<&str> {
+        self.get_ci(key).and_then(|x| x.as_str())
+    }
+
     pub fn to_json(&self) -> String {
         let mut out = String::new();
         self.write_json(&mut out);

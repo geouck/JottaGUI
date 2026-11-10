@@ -106,6 +106,7 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "status.reload.toast" => ("Genindlæser status…", "Reloading status…"),
         "status.speed.row" => ("Hastighed", "Speed"),
         "status.speed.format" => ("↓ {} · ↑ {}", "↓ {} · ↑ {}"),
+        "status.current.row" => ("Aktuel overførsel", "Current transfer"),
         // --- Sync page ---
         "sync.switch.title" => ("Kontinuerlig sync", "Continuous sync"),
         "sync.switch.subtitle" => (
@@ -240,6 +241,10 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "restore.abort.tooltip" => ("Annuller eller fjern fra liste", "Cancel or remove from list"),
         "restore.retry.tooltip" => ("Prøv igen", "Retry"),
         // --- Transfers page ---
+        "transfers.live.group" => ("I gang nu", "In progress"),
+        "transfers.live.empty.title" => ("Ingen aktive overførsler", "No active transfers"),
+        "transfers.live.empty.subtitle" => ("Overførsler vises her mens de kører", "Transfers appear here while they run"),
+        "transfers.live.progress" => ("{} / {} ({}%)", "{} / {} ({}%)"),
         "transfers.uploads.title" => ("Aktive uploads", "Active uploads"),
         "transfers.uploads.empty.title" => ("Ingen aktive uploads", "No active uploads"),
         "transfers.uploads.empty.subtitle" => ("Uploads vises her når de kører", "Uploads appear here while they run"),

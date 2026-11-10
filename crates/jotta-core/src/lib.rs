@@ -18,6 +18,7 @@ pub mod daemon;
 pub mod error;
 pub mod json;
 pub mod login;
+pub mod observe;
 pub mod remote;
 pub mod status;
 

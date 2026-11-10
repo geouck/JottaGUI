@@ -216,6 +216,14 @@ pub enum JottaCommand {
     /// Expected to have `--json` (same pattern as `list downloads --json`).
     /// Verified: `jotta-cli list --help` shows `uploads` subcommand.
     ListUploads,
+    /// `observe --help` — run once to detect whether `observe` supports `--json`
+    /// (see `observe::observe_help_supports_json`). Read-only.
+    ObserveHelp,
+    /// `observe --json` — long-lived read-only event stream of ongoing
+    /// uploads/downloads (the CLI's own live view). Only spawned when
+    /// `ObserveHelp` advertised `--json`; read stdout line by line and kill
+    /// the child on shutdown (see `CliClient::spawn_stream`).
+    ObserveJson,
     /// `list downloaderrors [--downloadid=<id>] [--json]` — error details
     /// for failed downloads. With no filter, lists all download errors.
     ListDownloadErrors { download_id: Option<String>, json: bool },
@@ -347,6 +355,8 @@ impl JottaCommand {
             }
             JottaCommand::ListDownloads => push(&mut args, &["list", "downloads", "--json"]),
             JottaCommand::ListUploads => push(&mut args, &["list", "uploads", "--json"]),
+            JottaCommand::ObserveHelp => push(&mut args, &["observe", "--help"]),
+            JottaCommand::ObserveJson => push(&mut args, &["observe", "--json"]),
             JottaCommand::ListDownloadInfo { download_id, json } => {
                 push(&mut args, &["list", "downloadinfo"]);
                 args.push(format!("--downloadid={download_id}"));
@@ -497,6 +507,31 @@ impl CliClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command
+            .spawn()
+            .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
+    }
+
+    /// Spawn a LONG-LIVED read-only command with stdout piped, for streaming
+    /// output such as `observe --json` (see `JottaCommand::ObserveJson`).
+    /// Same flatpak-spawn prefix as `run()`. The caller reads stdout line by
+    /// line, and MUST kill the child on shutdown (store it and `kill()` before
+    /// exiting, then `wait()` to reap). Only whitelisted argv — read-only.
+    pub fn spawn_stream(&self, cmd: &JottaCommand) -> Result<Child> {
+        let argv = cmd.argv();
+        let prefix = host_spawn_prefix(&self.locator.cli);
+        let mut command = if prefix.is_empty() {
+            Command::new(&self.locator.cli)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        command
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         command
             .spawn()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
