@@ -210,36 +210,63 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         }));
         let toast_overlay = toast_overlay.clone();
         let toast_rx = std::sync::Mutex::new(toast_rx);
+        // CRASH-FIX (ABRT/panic_cannot_unwind): `Toast::dismiss()` emitter
+        // "dismissed"-signalet SYNKRONT, og vores connect_dismissed-handler
+        // kalder derefter borrow_mut() på samme Rc<RefCell>. Hvis vi holder et
+        // borrow mens vi kalder dismiss(), panikker RefCell over FFI-grænsen
+        // (panic_cannot_unwind -> abort). Derfor: ALDRIG hold et RefCell-borrow
+        // på tværs af GTK-kald der kan emitte signaler — kun korte borrows der
+        // slippes før selve kaldet.
         glib::idle_add_local(move || {
             let rx = toast_rx.lock().unwrap();
             while let Ok(msg) = rx.try_recv() {
                 let state2 = state.clone();
                 let toast_overlay2 = toast_overlay.clone();
-                let mut st = state2.borrow_mut();
-                if let Some(t) = st.current.clone() {
-                    t.set_title(&msg); // nyeste besked vinder med det samme
-                } else {
-                    let t = adw::Toast::new(&msg);
-                    let state3 = state2.clone();
-                    t.connect_dismissed(move |_| {
-                        state3.borrow_mut().current = None;
-                    });
-                    toast_overlay2.add_toast(t.clone());
-                    st.current = Some(t);
+                let existing = state2.borrow().current.clone();
+                match existing {
+                    Some(t) => {
+                        t.set_title(&msg); // nyeste besked vinder med det samme
+                    }
+                    None => {
+                        let t = adw::Toast::new(&msg);
+                        // AdwToast parses som Pango-markup som standard (>= 1.4);
+                        // vores beskeder er ren tekst (stier kan indeholde '&').
+                        t.set_use_markup(false);
+                        let state3 = state2.clone();
+                        t.connect_dismissed(move |_| {
+                            // try_borrow_mut: forsvar mod re-entry — et abort over
+                            // FFI er værre end en enkelt oversprunget oprydning.
+                            if let Ok(mut st) = state3.try_borrow_mut() {
+                                st.current = None;
+                            }
+                        });
+                        toast_overlay2.add_toast(t.clone());
+                        state2.borrow_mut().current = Some(t);
+                    }
                 }
-                if let Some(id) = st.timer.take() {
-                    id.remove();
+                // Nulstil dismiss-timer (4 s efter seneste besked).
+                {
+                    let mut st = state2.borrow_mut();
+                    if let Some(id) = st.timer.take() {
+                        id.remove();
+                    }
                 }
                 let state4 = state2.clone();
                 let id = glib::timeout_add_local(Duration::from_secs(4), move || {
-                    let mut st = state4.borrow_mut();
-                    if let Some(t) = st.current.take() {
+                    // Tag toasten ud og SLIP BORROWET før dismiss() — dismiss()
+                    // emitter "dismissed" synkront og ville ellers re-enter
+                    // connect_dismissed-handleren mens samme RefCell er låst.
+                    let t = {
+                        let mut st = state4.borrow_mut();
+                        st.timer = None;
+                        st.current.take()
+                    };
+                    if let Some(t) = t {
                         t.dismiss();
                     }
-                    st.timer = None;
                     glib::ControlFlow::Break
                 });
-                st.timer = Some(id);
+                state2.borrow_mut().timer = Some(id);
             }
             glib::ControlFlow::Continue
         });

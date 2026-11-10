@@ -48,6 +48,79 @@ pub fn icon_for_state(state: State) -> Vec<Icon> {
     }
 }
 
+/// Sort/hvidt (mono) pixmap-sæt (iteration 14): samme glyffer og størrelser som
+/// `icon_for_state`, men desatureret til gråtone (alpha bevares).
+///
+/// NØDVENDIGT fordi KDE/Plasma foretrækker det indlejrede IconPixmap frem for
+/// IconName — hvis kun `icon_name` skifter til symbolic, har mono-togglen
+/// (tray_icon_mono=true) ingen synlig effekt. Ved at levere et desatureret
+/// pixmap skifter det faktisk viste ikon også.
+pub fn icon_for_state_mono(state: State) -> Vec<Icon> {
+    icon_for_state(state)
+        .into_iter()
+        .map(|ic| Icon {
+            width: ic.width,
+            height: ic.height,
+            data: desaturate(&ic.data),
+        })
+        .collect()
+}
+
+/// BGRA-pixelbuffer -> gråtone (ITU-R BT.601 luma); alpha-kanalen uændret.
+fn desaturate(data: &[u8]) -> Vec<u8> {
+    let mut out = data.to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let b = u32::from(px[0]);
+        let g = u32::from(px[1]);
+        let r = u32::from(px[2]);
+        let gray = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
+        px[0] = gray;
+        px[1] = gray;
+        px[2] = gray;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desaturate_produces_gray_and_keeps_alpha() {
+        // Én pixel BGRA: (B=200, G=100, R=50), alpha=255.
+        let out = desaturate(&[200u8, 100, 50, 255]);
+        assert_eq!(out[3], 255, "alpha må ikke ændres");
+        assert_eq!(out[0], out[1]);
+        assert_eq!(out[1], out[2]);
+        let expected = (50u32 * 299 + 100 * 587 + 200 * 114) / 1000;
+        assert_eq!(u32::from(out[0]), expected);
+    }
+
+    #[test]
+    fn mono_keeps_sizes_count_and_is_not_colored() {
+        for state in [
+            State::Idle,
+            State::Syncing,
+            State::Paused,
+            State::NeedsLogin,
+            State::Offline,
+        ] {
+            let color = icon_for_state(state);
+            let mono = icon_for_state_mono(state);
+            assert_eq!(color.len(), mono.len());
+            for (c, m) in color.iter().zip(mono.iter()) {
+                assert_eq!(c.width, m.width);
+                assert_eq!(c.height, m.height);
+                assert_eq!(c.data.len(), m.data.len());
+                for px in m.data.chunks_exact(4) {
+                    assert_eq!(px[0], px[1]);
+                    assert_eq!(px[1], px[2]);
+                }
+            }
+        }
+    }
+}
+
 const PIXMAP_IDLE_16_DATA: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

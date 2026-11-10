@@ -265,7 +265,11 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "info.system.group" => ("System", "System"),
         // --- Settings page ---
         "settings.general.group" => ("Generelt", "General"),
-        "settings.account.group" => ("Konto & enhed", "Account & device"),
+        // NB: AdwPreferencesGroup's title/description labels have use-markup=True
+        // in libadwaita's template, so '&' MUST be escaped as '&amp;' in any key
+        // used as a PreferencesGroup title (a raw '&' logs a Gtk-WARNING and the
+        // markup parse fails). This key is only used as a group title.
+        "settings.account.group" => ("Konto &amp; enhed", "Account &amp; device"),
         "settings.about.group" => ("Om", "About"),
         "settings.tray.mono.title" => ("Sort/hvidt tray-ikon", "Black/white tray icon"),
         "settings.tray.mono.subtitle" => ("Brug det monokrome symbolic-ikon i systembakken", "Use the monochrome symbolic icon in the system tray"),

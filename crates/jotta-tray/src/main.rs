@@ -119,8 +119,16 @@ impl Tray for JottaTray {
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         // Embed ARGB32 pixmap data so the tray icon is always visible,
         // even when the icon theme path is not found by the host.
+        // NB (iteration 14 fix): KDE/Plasma prefers the embedded IconPixmap over
+        // IconName, so the mono toggle (tray_icon_mono=true) must swap the PIXMAP
+        // too — changing only icon_name() has no visible effect. In mono mode we
+        // therefore return a desaturated (grayscale) variant of the state pixmap.
         let state = self.state.lock().unwrap().status.state;
-        pixmaps::icon_for_state(state)
+        if tray_mono() {
+            pixmaps::icon_for_state_mono(state)
+        } else {
+            pixmaps::icon_for_state(state)
+        }
     }
 
     fn title(&self) -> String {
