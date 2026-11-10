@@ -193,14 +193,51 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     // Channel from worker threads -> main loop for toast messages.
     // Only String crosses the thread boundary; the toast is created on the main thread.
+    // SEMANTIK (owner-requested): én aktuel toast — en ny besked ERSTATTER teksten
+    // i den synlige toast med det samme (ingen kø), og toasten dismisses 4 s efter
+    // den seneste besked (timer nulstilles pr. besked).
     let (toast_tx, toast_rx) = std::sync::mpsc::channel::<String>();
     {
+        struct ToastState {
+            current: Option<adw::Toast>,
+            timer: Option<glib::SourceId>,
+        }
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ToastState {
+            current: None,
+            timer: None,
+        }));
         let toast_overlay = toast_overlay.clone();
         let toast_rx = std::sync::Mutex::new(toast_rx);
         glib::idle_add_local(move || {
             let rx = toast_rx.lock().unwrap();
             while let Ok(msg) = rx.try_recv() {
-                toast_overlay.add_toast(adw::Toast::new(&msg));
+                let state2 = state.clone();
+                let toast_overlay2 = toast_overlay.clone();
+                let mut st = state2.borrow_mut();
+                if let Some(t) = st.current.clone() {
+                    t.set_title(&msg); // nyeste besked vinder med det samme
+                } else {
+                    let t = adw::Toast::new(&msg);
+                    let state3 = state2.clone();
+                    t.connect_dismissed(move |_| {
+                        state3.borrow_mut().current = None;
+                    });
+                    toast_overlay2.add_toast(t.clone());
+                    st.current = Some(t);
+                }
+                if let Some(id) = st.timer.take() {
+                    id.remove();
+                }
+                let state4 = state2.clone();
+                let id = glib::timeout_add_local(Duration::from_secs(4), move || {
+                    let mut st = state4.borrow_mut();
+                    if let Some(t) = st.current.take() {
+                        t.dismiss();
+                    }
+                    st.timer = None;
+                    glib::ControlFlow::Break
+                });
+                st.timer = Some(id);
             }
             glib::ControlFlow::Continue
         });
@@ -261,6 +298,42 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         });
     }
 
+    // "Log ud" (iteration 12): DESTRUKTIV — altid bekræft før `jotta-cli logout`.
+    // Synlig når logget ind; efter logout går status -> NeedsLogin, og
+    // "Log ind"-rækken dukker op igen (skift bruger = log ud + log ind igen).
+    let logout_row = adw::ActionRow::builder()
+        .title("Log ud")
+        .subtitle("Fjerner denne enheds login fra Jottacloud")
+        .build();
+    let logout_btn = gtk::Button::with_label("Log ud");
+    logout_btn.add_css_class("destructive-action");
+    logout_btn.set_valign(gtk::Align::Center);
+    logout_btn.set_visible(false);
+    logout_row.add_suffix(&logout_btn);
+    logout_row.set_activatable_widget(Some(&logout_btn));
+    {
+        let window = window.clone();
+        let toast_tx = toast_tx.clone();
+        logout_btn.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(
+                Some("Log ud?"),
+                Some("Login fjernes fra denne enhed og backup/sync stopper. Filer i skyen påvirkes ikke. Du kan logge ind igen med et nyt token."),
+            );
+            dialog.add_response("cancel", "Annuller");
+            dialog.add_response("logout", "Log ud");
+            dialog.set_response_appearance("logout", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let toast_tx = toast_tx.clone();
+            dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
+                if resp == "logout" {
+                    run_cli(JottaCommand::Logout);
+                    let _ = toast_tx.send("Logger ud…".to_string());
+                }
+            });
+        });
+    }
+
     let status_page = build_status_page(
         &status_state_label,
         &status_email_label,
@@ -269,6 +342,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &pause_switch,
         &daemon_banner,
         &login_row,
+        &logout_row,
     );
     stack.add_titled(&status_page, Some("status"), "Status");
 
@@ -447,7 +521,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let info_page = build_info_page(&info_group);
     stack.add_titled(&info_page, Some("info"), "Info");
 
-    let settings_page = build_settings_page();
+    let settings_page = build_settings_page(toast_tx.clone());
     stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
@@ -1162,6 +1236,7 @@ Vil du erstatte den?",
         toast_tx: toast_tx.clone(),
         daemon_banner: daemon_banner.clone(),
         login_row: login_row.clone(),
+        logout_row: logout_row.clone(),
     };
 
     // --- Info page: fetch Jottacloud version once on a worker thread ---
@@ -1240,14 +1315,18 @@ Vil du erstatte den?",
             }
             let status = match poll_client.status() {
                 Ok(v) => Status::from_json(&v),
-                Err(_) => Status::default(),
+                // PR #14-mapping også i tråd-polleren: "Not logged in" -> NeedsLogin
+                Err(e) => Status::from_cli_error(&e),
             };
+            // Adaptivt interval (ressourcer): 3s mens aktiv (sync/restore),
+            // ellers 10s når idle — ét status-kald pr. interval.
+            let active = matches!(status.state, State::Syncing) || status.restore_working;
             {
                 let mut guard = poll_status.lock().unwrap();
                 *guard = status.clone();
             }
             let _ = status_tx.send(status);
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(if active { 3 } else { 10 }));
         });
     }
     {
@@ -1346,6 +1425,8 @@ struct StatusWidgets {
     daemon_banner: adw::Banner,
     /// Login-række vises kun ved State::NeedsLogin.
     login_row: adw::ActionRow,
+    /// Log ud-række vises kun når logget ind.
+    logout_row: adw::ActionRow,
 }
 
 impl Clone for StatusWidgets {
@@ -1369,6 +1450,7 @@ impl Clone for StatusWidgets {
             toast_tx: self.toast_tx.clone(),
             daemon_banner: self.daemon_banner.clone(),
             login_row: self.login_row.clone(),
+            logout_row: self.logout_row.clone(),
         }
     }
 }
@@ -1390,6 +1472,11 @@ impl StatusWidgets {
         // Login-række: kun ved NeedsLogin (polleren styrer synligheden).
         self.login_row
             .set_visible(matches!(status.state, State::NeedsLogin));
+        // Log ud-række: kun når logget ind (ikke NeedsLogin/Offline).
+        self.logout_row.set_visible(matches!(
+            status.state,
+            State::Idle | State::Syncing | State::Paused
+        ));
 
         // Daemon banner: vis når offline (jottad svarer ikke).
         // Én fejlmeddelelse — polleren viser ikke banner igen før næste offline.
@@ -1612,6 +1699,7 @@ fn build_status_page(
     pause_switch: &gtk::Switch,
     daemon_banner: &adw::Banner,
     login_row: &adw::ActionRow,
+    logout_row: &adw::ActionRow,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
@@ -1639,6 +1727,7 @@ fn build_status_page(
     account_group.add(&state_row);
     account_group.add(&email_row);
     account_group.add(login_row);
+    account_group.add(logout_row);
     box_.append(&account_group);
 
     // Pause/resume: positiv formulering — ON = automatisk aktiv.
@@ -1875,8 +1964,143 @@ fn set_row_value(row: &adw::ActionRow, value: &str) {
     row.set_subtitle(value);
 }
 
-/// Byg Indstillinger-siden med minimize-to-tray switch.
-fn build_settings_page() -> gtk::Widget {
+/// Sti til GUI'ens settings.conf (~/.config/jotta-desktop/settings.conf).
+fn settings_conf_path() -> std::path::PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf")
+}
+
+/// Læs en `key=true|false`-værdi fra settings.conf.
+fn read_bool_setting(path: &std::path::Path, key: &str) -> Option<bool> {
+    let want_true = format!("{key}=true");
+    let want_false = format!("{key}=false");
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .map(str::trim_end)
+        .find(|l| *l == want_true || *l == want_false)
+        .map(|l| l == want_true)
+}
+
+/// Skriv en `key=true|false`-værdi — read-modify-write, bevarer andre nøgler.
+fn write_bool_setting(path: &std::path::Path, key: &str, value: bool) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let prefix = format!("{key}=");
+    let mut lines: Vec<String> = std::fs::read_to_string(path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_end().starts_with(&prefix))
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(format!("{prefix}{value}"));
+    let _ = std::fs::write(path, format!("{}\n", lines.join("\n")));
+}
+
+/// Er <pid> vores egen jotta-tray-proces? Sikkerhed før kill — aldrig en
+/// fremmed proces, og aldrig jottad.
+fn tray_pid_alive(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // state står efter sidste ')' i /proc/<pid>/stat; 'Z' = zombie = død for os.
+    !matches!(
+        stat.rsplit(')').next().and_then(|r| r.trim_start().chars().next()),
+        Some('Z') | None
+    )
+}
+
+fn tray_pid_matches(pid: u32) -> bool {
+    tray_pid_alive(pid)
+        && std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .map(|c| c.contains("jotta-tray"))
+            .unwrap_or(false)
+}
+
+/// Fjern pid-filen hvis den peger på en død/zombie/ikke-tray proces — ellers
+/// tror næste jotta-tray-start at en gammel instans kører og exit'er.
+fn clear_stale_tray_pid() {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let pid_file = std::path::PathBuf::from(dir).join("jotta-tray.pid");
+        if let Ok(s) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = s.trim().parse::<u32>() {
+                if !tray_pid_matches(pid) {
+                    let _ = std::fs::remove_file(&pid_file);
+                }
+            }
+        }
+    }
+}
+
+/// Slå tray-ikon til/fra NU og ved fremtidige login (XDG user-override med
+/// Hidden=true — overskriver /etc/xdg/autostart uden at røre den).
+/// Returnerer besked til toast.
+fn set_tray_visibility(visible: bool) -> String {
+    let autostart_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("autostart");
+    let override_file = autostart_dir.join("jotta-tray.desktop");
+    if visible {
+        let _ = std::fs::remove_file(&override_file);
+    } else if let Some(parent) = override_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        let _ = std::fs::write(
+            &override_file,
+            "[Desktop Entry]\nType=Application\nHidden=true\n",
+        );
+    }
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .map(|d| std::path::PathBuf::from(d).join("jotta-tray.pid"));
+    let running = pid_file
+        .as_ref()
+        .and_then(|pf| std::fs::read_to_string(pf).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|pid| tray_pid_matches(*pid));
+    match (visible, running) {
+        (true, Some(pid)) => format!("Tray-ikonet kører allerede (pid {pid})"),
+        (true, None) => respawn_tray(),
+        (false, Some(pid)) => {
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            // Vent til /proc/<pid> er væk (maks ~2s), så pid-filen ikke bliver stale.
+            for _ in 0..20 {
+                if !tray_pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            clear_stale_tray_pid();
+            "Tray-ikon skjult".to_string()
+        }
+        (false, None) => "Tray-ikon var allerede skjult".to_string(),
+    }
+}
+
+/// Byg Indstillinger-siden: minimize-to-tray, start ved login, vis tray-ikon,
+/// avancerede jottad-indstillinger (uploadrate/downloadrate/scaninterval).
+fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget {
     let group = adw::PreferencesGroup::builder()
         .title("Generelt")
         .build();
@@ -1890,37 +2114,11 @@ fn build_settings_page() -> gtk::Widget {
     let mtt_switch = gtk::Switch::new();
     mtt_switch.set_valign(gtk::Align::Center);
     // Læs nuværende værdi fra konfigurationsfil
-    let config_path = std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".config")
-        })
-        .join("jotta-desktop")
-        .join("settings.conf");
-    let mtt_enabled = std::fs::read_to_string(&config_path)
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("minimize_to_tray=")).map(|l| l.trim_end() == "minimize_to_tray=true"))
-        .unwrap_or(true); // Standard: AKTIV
+    let config_path = settings_conf_path();
+    let mtt_enabled = read_bool_setting(&config_path, "minimize_to_tray").unwrap_or(true); // Standard: AKTIV
     mtt_switch.set_active(mtt_enabled);
     mtt_switch.connect_state_set(move |sw, state| {
-        let config_path = std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(".config")
-            })
-            .join("jotta-desktop")
-            .join("settings.conf");
-        if let Some(parent) = config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let content = format!("minimize_to_tray={}\n", state);
-        let _ = std::fs::write(&config_path, content);
+        write_bool_setting(&settings_conf_path(), "minimize_to_tray", state);
         sw.set_active(state);
         Propagation::Proceed
     });
@@ -1986,10 +2184,168 @@ fn build_settings_page() -> gtk::Widget {
     autostart_row.set_activatable_widget(Some(&autostart_switch));
     group.add(&autostart_row);
 
+    // Tray-ikon som TOGGLE (owner-requested 2026-11, iteration 12): ON = kører
+    // (genstart hvis nede); OFF = skjules nu OG ved fremtidige login
+    // (XDG user-override Hidden=true + tray_visible i settings.conf).
+    // Kun vores egen proces dræbes (verificeret via /proc/<pid>/cmdline).
+    let tray_row = adw::ActionRow::builder()
+        .title("Tray-ikon")
+        .subtitle("Vis ikonet i systembakken — slå fra for at skjule det")
+        .build();
+    let tray_switch = gtk::Switch::new();
+    tray_switch.set_valign(gtk::Align::Center);
+    let tray_visible = read_bool_setting(&config_path, "tray_visible").unwrap_or(true);
+    tray_switch.set_active(tray_visible);
+    tray_row.add_suffix(&tray_switch);
+    tray_row.set_activatable_widget(Some(&tray_switch));
+    group.add(&tray_row);
+    // Ved opstart: hvis pref er FRA, sørg for at tray heller ikke kører nu.
+    if !tray_visible {
+        std::thread::spawn(|| {
+            let _ = set_tray_visibility(false);
+        });
+    }
+    {
+        let toast_tx = toast_tx.clone();
+        tray_switch.connect_state_set(move |sw, state| {
+            write_bool_setting(&settings_conf_path(), "tray_visible", state);
+            let toast_tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                let msg = set_tray_visibility(state);
+                let _ = toast_tx.send(msg);
+            });
+            sw.set_active(state);
+            Propagation::Proceed
+        });
+    }
+
+    // Avanceret (iteration 12): jottad config-værdier. Læses via `jotta-cli config`
+    // (key : value-linjer) på worker-tråd; gemmes via `config set <key> <value>`.
+    let adv_group = adw::PreferencesGroup::builder()
+        .title("Avanceret")
+        .description("jottad-indstillinger — tomme felter ændres ikke ved gem")
+        .build();
+    let up_row = adw::EntryRow::builder().title("Båndbredde op (uploadrate)").build();
+    let down_row = adw::EntryRow::builder().title("Båndbredde ned (downloadrate)").build();
+    let scan_row = adw::EntryRow::builder()
+        .title("Scan-interval (scaninterval — 0 = realtime)")
+        .build();
+    adv_group.add(&up_row);
+    adv_group.add(&down_row);
+    adv_group.add(&scan_row);
+    let save_row = adw::ActionRow::builder()
+        .title("Gem avancerede indstillinger")
+        .build();
+    let save_btn = gtk::Button::with_label("Gem");
+    save_btn.add_css_class("suggested-action");
+    save_btn.set_valign(gtk::Align::Center);
+    save_row.add_suffix(&save_btn);
+    save_row.set_activatable_widget(Some(&save_btn));
+    adv_group.add(&save_row);
+
+    // Hent nuværende værdier én gang (worker -> kanal -> main loop).
+    {
+        let (cfg_tx, cfg_rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+        let cfg_rx = Arc::new(Mutex::new(cfg_rx));
+        std::thread::spawn(move || {
+            let v = BinaryLocator::from_path()
+                .and_then(|loc| CliClient::new(loc).run_text(&JottaCommand::ConfigList).ok())
+                .map(|t| jotta_core::cli::parse_config_lines(&t))
+                .unwrap_or_default();
+            let _ = cfg_tx.send(v);
+        });
+        let up2 = up_row.clone();
+        let down2 = down_row.clone();
+        let scan2 = scan_row.clone();
+        glib::idle_add_local(move || {
+            let rx = cfg_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(v) => {
+                    let get = |k: &str| v.iter().find(|(key, _)| key == k).map(|(_, val)| val.clone());
+                    if let Some(val) = get("uploadrate") {
+                        up2.set_text(&val);
+                    }
+                    if let Some(val) = get("downloadrate") {
+                        down2.set_text(&val);
+                    }
+                    if let Some(val) = get("scaninterval") {
+                        scan2.set_text(&val);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+    }
+
+    // Gem: kør `config set` pr. ikke-tomt felt på worker-tråd. Ikke-destruktiv.
+    {
+        let toast_tx = toast_tx.clone();
+        save_btn.connect_clicked(move |_| {
+            let up = up_row.text().trim().to_string();
+            let down = down_row.text().trim().to_string();
+            let scan = scan_row.text().trim().to_string();
+            let toast_tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let mut ok = true;
+                    for (k, v) in [("uploadrate", up), ("downloadrate", down), ("scaninterval", scan)] {
+                        if !v.is_empty() {
+                            if let Err(e) = client.run(&JottaCommand::ConfigSet { key: k.into(), value: v }) {
+                                eprintln!("jotta-gui: config set {k}: {e}");
+                                ok = false;
+                            }
+                        }
+                    }
+                    let _ = toast_tx.send(if ok {
+                        "Avancerede indstillinger gemt".to_string()
+                    } else {
+                        "Nogle indstillinger kunne ikke gemmes (se log)".to_string()
+                    });
+                }
+            });
+        });
+    }
+
     let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_widget, 12);
     box_widget.append(&group);
+    box_widget.append(&adv_group);
     scrollable_page(&box_widget.upcast()).upcast()
+}
+
+/// Genstart jotta-tray: led efter binaren ved siden af eget exe, så i PATH.
+/// Returnerer en besked til toast. Kun vores egen binær, ingen shell-strenge.
+fn respawn_tray() -> String {
+    // Ryd evt. stale pid-fil først — ellers tror den nye proces at en gammel kører.
+    clear_stale_tray_pid();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("jotta-tray"));
+        }
+    }
+    if let Ok(paths) = std::env::var("PATH") {
+        for p in std::env::split_paths(&paths) {
+            candidates.push(p.join("jotta-tray"));
+        }
+    }
+    match candidates.into_iter().find(|p| p.is_file()) {
+        Some(bin) => match std::process::Command::new(&bin).spawn() {
+            Ok(mut child) => {
+                // Reaper: ellers bliver den nye tray til zombie når den exit'er,
+                // og /proc/<pid> lever videre -> næste start fejler igen.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                format!("jotta-tray startet igen ({})", bin.display())
+            }
+            Err(e) => format!("Kunne ikke starte jotta-tray: {e}"),
+        },
+        None => "jotta-tray-binaren blev ikke fundet (tjek PATH)".to_string(),
+    }
 }
 
 /// Parse `jotta-cli ignores list --json` output (backup ignores).

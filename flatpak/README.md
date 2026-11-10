@@ -186,7 +186,7 @@ spawned.
 | `--filesystem=host-os` | See host `/usr/bin` etc. at `/run/host/...` (find host jotta-cli/jottad) |
 | `--filesystem=xdg-run/jottad` | Access jottad's Unix socket |
 | `--talk-name=org.freedesktop.Flatpak` | `flatpak-spawn --host`: run jotta-cli/jottad on the host |
-| `--filesystem=xdg-config/autostart:ro` | Read autostart entries (launch-on-startup toggle) |
+| `--filesystem=xdg-config/autostart` (rw) | Write autostart entries (launch-on-startup toggle + `Hidden=true` override der skjuler jotta-tray) |
 | `--talk-name=org.freedesktop.Notifications` | Desktop notifications |
 | `--talk-name=org.kde.StatusNotifierWatcher` | KDE tray icon support |
 

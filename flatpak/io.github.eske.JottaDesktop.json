@@ -17,7 +17,7 @@
     "--filesystem=host",
     "--filesystem=host-os",
     "--filesystem=xdg-run/jottad",
-    "--filesystem=xdg-config/autostart:ro",
+    "--filesystem=xdg-config/autostart",
     "--talk-name=org.freedesktop.Notifications",
     "--talk-name=org.freedesktop.Flatpak",
     "--talk-name=org.kde.StatusNotifierWatcher"
