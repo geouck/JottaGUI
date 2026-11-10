@@ -1974,10 +1974,38 @@ fn write_bool_setting(path: &std::path::Path, key: &str, value: bool) {
 
 /// Er <pid> vores egen jotta-tray-proces? Sikkerhed før kill — aldrig en
 /// fremmed proces, og aldrig jottad.
+fn tray_pid_alive(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // state står efter sidste ')' i /proc/<pid>/stat; 'Z' = zombie = død for os.
+    !matches!(
+        stat.rsplit(')').next().and_then(|r| r.trim_start().chars().next()),
+        Some('Z') | None
+    )
+}
+
 fn tray_pid_matches(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .map(|c| c.contains("jotta-tray"))
-        .unwrap_or(false)
+    tray_pid_alive(pid)
+        && std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .map(|c| c.contains("jotta-tray"))
+            .unwrap_or(false)
+}
+
+/// Fjern pid-filen hvis den peger på en død/zombie/ikke-tray proces — ellers
+/// tror næste jotta-tray-start at en gammel instans kører og exit'er.
+fn clear_stale_tray_pid() {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let pid_file = std::path::PathBuf::from(dir).join("jotta-tray.pid");
+        if let Ok(s) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = s.trim().parse::<u32>() {
+                if !tray_pid_matches(pid) {
+                    let _ = std::fs::remove_file(&pid_file);
+                }
+            }
+        }
+    }
 }
 
 /// Slå tray-ikon til/fra NU og ved fremtidige login (XDG user-override med
@@ -2019,6 +2047,14 @@ fn set_tray_visibility(visible: bool) -> String {
                 .arg("-TERM")
                 .arg(pid.to_string())
                 .status();
+            // Vent til /proc/<pid> er væk (maks ~2s), så pid-filen ikke bliver stale.
+            for _ in 0..20 {
+                if !tray_pid_alive(pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            clear_stale_tray_pid();
             "Tray-ikon skjult".to_string()
         }
         (false, None) => "Tray-ikon var allerede skjult".to_string(),
@@ -2246,6 +2282,8 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
 /// Genstart jotta-tray: led efter binaren ved siden af eget exe, så i PATH.
 /// Returnerer en besked til toast. Kun vores egen binær, ingen shell-strenge.
 fn respawn_tray() -> String {
+    // Ryd evt. stale pid-fil først — ellers tror den nye proces at en gammel kører.
+    clear_stale_tray_pid();
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -2259,7 +2297,14 @@ fn respawn_tray() -> String {
     }
     match candidates.into_iter().find(|p| p.is_file()) {
         Some(bin) => match std::process::Command::new(&bin).spawn() {
-            Ok(_) => format!("jotta-tray startet igen ({})", bin.display()),
+            Ok(child) => {
+                // Reaper: ellers bliver den nye tray til zombie når den exit'er,
+                // og /proc/<pid> lever videre -> næste start fejler igen.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                format!("jotta-tray startet igen ({})", bin.display())
+            }
             Err(e) => format!("Kunne ikke starte jotta-tray: {e}"),
         },
         None => "jotta-tray-binaren blev ikke fundet (tjek PATH)".to_string(),

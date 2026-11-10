@@ -263,6 +263,23 @@ fn open_url(url: &str) -> std::io::Result<()> {
     ))
 }
 
+
+/// Er <pid> en levende (ikke-zombie) jotta-tray-proces? /proc/<pid>/stat har
+/// state lige efter sidste ')'; 'Z' = zombie = død for vores formål (en zombie
+/// holder /proc/<pid> i live og narrede tidligere single-instance-checket).
+fn pid_alive_and_is_tray(pid: u32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    match stat.rsplit(')').next().and_then(|r| r.trim_start().chars().next()) {
+        Some('Z') | None => false,
+        _ => std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+            .map(|c| c.contains("jotta-tray"))
+            .unwrap_or(false),
+    }
+}
+
 fn main() {
     // Single-instance: skriv PID-fil og afslut hvis en anden tray allerede kører.
     let pid_file = std::env::var("XDG_RUNTIME_DIR")
@@ -272,10 +289,12 @@ fn main() {
 
     if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            if pid_alive_and_is_tray(pid) {
                 eprintln!("jotta-tray: already running (pid {pid}), exiting");
                 std::process::exit(0);
             }
+            // Stale pid-fil (død/zombie/ikke-tray): fjern og fortsæt.
+            let _ = std::fs::remove_file(&pid_file);
         }
     }
 
