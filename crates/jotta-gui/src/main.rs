@@ -1190,15 +1190,18 @@ Vil du erstatte den?",
                     rebuild_uploads_list(&uploads_list, &uploads);
                     rebuild_transfers_downloads_list(&downloads_list, &downloads);
                     // Live hastighed på Status-fanen: "—" når idle.
-                    speed_label.set_text(if up_rate == 0 && down_rate == 0 {
-                        "—"
+                    // NB: bind til let først — `&tf!(...)` i en if/else-arm giver
+                    // E0716 (temporary droppes ved armens slutning).
+                    let speed_text = if up_rate == 0 && down_rate == 0 {
+                        "—".to_string()
                     } else {
-                        &tf!(
+                        tf!(
                             "status.speed.format",
                             i18n::format_rate(down_rate),
                             i18n::format_rate(up_rate)
                         )
-                    });
+                    };
+                    speed_label.set_text(&speed_text);
                     // Derive errors from entries (no separate CLI call needed).
                     let errors = jotta_core::remote::collect_transfer_errors(&downloads, &uploads);
                     rebuild_transfer_errors_list(&errors_list, &errors);
