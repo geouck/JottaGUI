@@ -247,12 +247,12 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
+    // Iteration 14: 5 faner (SPEC §3) — Overførsler & Gendan er smeltet sammen,
+    // Info/Konto bor i Indstillinger.
     sidebar.append(&nav_item(i18n::t("nav.status"), "io.github.eske.JottaDesktop-symbolic"));
     sidebar.append(&nav_item(i18n::t("nav.backup"), "folder-symbolic"));
     sidebar.append(&nav_item(i18n::t("nav.sync"), "folder-sync-symbolic"));
-    sidebar.append(&nav_item(i18n::t("nav.transfers"), "emblem-downloads-symbolic"));
-    sidebar.append(&nav_item(i18n::t("nav.restore"), "document-revert-symbolic"));
-    sidebar.append(&nav_item(i18n::t("nav.info"), "dialog-information-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.transfers_restore"), "emblem-downloads-symbolic"));
     sidebar.append(&nav_item(i18n::t("nav.settings"), "emblem-system-symbolic"));
 
     let stack = gtk::Stack::new();
@@ -336,6 +336,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         });
     }
 
+    // Live up/down-hastighed (iteration 14): opdateres af transfers-polleren.
+    let status_speed_label = gtk::Label::new(Some("—"));
+    status_speed_label.add_css_class("dim-label");
     let status_page = build_status_page(
         &status_state_label,
         &status_email_label,
@@ -343,15 +346,23 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &status_usage_label,
         &pause_switch,
         &daemon_banner,
-        &login_row,
-        &logout_row,
+        &status_speed_label,
     );
     stack.add_titled(&status_page, Some("status"), i18n::t("nav.status"));
 
     // --- Backup page ---
     let backup_list = gtk::ListBox::new();
     backup_list.add_css_class("boxed-list");
-    let backup_page = build_backup_page(&backup_list);
+    // Planlægning (SPEC §3): scaninterval bor på Backup-fanen; Gem-knappen i
+    // Indstillinger > Avanceret læser stadig samme row (passeret videre).
+    let scan_row = adw::EntryRow::builder()
+        .title(i18n::t("settings.scaninterval"))
+        .build();
+    let schedule_group = adw::PreferencesGroup::builder()
+        .title(i18n::t("backup.schedule.group"))
+        .build();
+    schedule_group.add(&scan_row);
+    let backup_page = build_backup_page(&backup_list, &schedule_group);
     stack.add_titled(&backup_page, Some("backup"), i18n::t("nav.backup"));
 
     // --- Sync page ---
@@ -431,12 +442,6 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         .build();
     transfers_errors_group.add(&transfers_errors_list);
 
-    let transfers_page = build_transfers_page(
-        &transfers_uploads_group,
-        &transfers_downloads_group,
-        &transfers_errors_group,
-    );
-    stack.add_titled(&transfers_page, Some("transfers"), i18n::t("nav.transfers"));
 
     // --- Gendan (restore/download) page ---
     // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
@@ -495,15 +500,6 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let restore_trash_group = adw::PreferencesGroup::new();
     restore_trash_group.add(&restore_trash_row);
 
-    let restore_page = build_restore_page(
-        &restore_path_box,
-        &restore_scrolled,
-        &restore_group,
-        &restore_downloads_group,
-        &restore_downloads_list,
-        &restore_trash_group,
-    );
-    stack.add_titled(&restore_page, Some("restore"), i18n::t("nav.restore"));
 
     // --- Info page: device, versions, subscription, account ---
     // Data from status --json (device, email, subscription) +
@@ -514,16 +510,41 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let info_sub_row = adw::ActionRow::builder().title(i18n::t("info.subscription")).build();
     let info_jotta_ver_row = adw::ActionRow::builder().title(i18n::t("info.jotta.version")).build();
     let info_app_ver_row = adw::ActionRow::builder().title(i18n::t("info.app.version")).build();
-    let info_group = adw::PreferencesGroup::builder().title(i18n::t("info.system.group")).build();
-    info_group.add(&info_device_row);
-    info_group.add(&info_email_row);
-    info_group.add(&info_sub_row);
-    info_group.add(&info_jotta_ver_row);
-    info_group.add(&info_app_ver_row);
-    let info_page = build_info_page(&info_group);
-    stack.add_titled(&info_page, Some("info"), i18n::t("nav.info"));
+    // Iteration 14: Overførsler & Gendan som ÉN fane (SPEC §3).
+    let transfers_restore_page = build_transfers_restore_page(
+        &transfers_uploads_group,
+        &transfers_downloads_group,
+        &transfers_errors_group,
+        &restore_path_box,
+        &restore_scrolled,
+        &restore_group,
+        &restore_downloads_group,
+        &restore_downloads_list,
+        &restore_trash_group,
+    );
+    stack.add_titled(
+        &transfers_restore_page,
+        Some("transfers_restore"),
+        i18n::t("nav.transfers_restore"),
+    );
 
-    let settings_page = build_settings_page(toast_tx.clone());
+    // Tidligere Info-fane bliver til "Konto & enhed" + "Om"-grupper i Indstillinger.
+    // Log ind/Log ud-rækkerne flytter også hertil (stadig styret af status-polleren).
+    let account_group = adw::PreferencesGroup::builder()
+        .title(i18n::t("settings.account.group"))
+        .build();
+    account_group.add(&info_device_row);
+    account_group.add(&info_email_row);
+    account_group.add(&info_sub_row);
+    account_group.add(&login_row);
+    account_group.add(&logout_row);
+    let about_group = adw::PreferencesGroup::builder()
+        .title(i18n::t("settings.about.group"))
+        .build();
+    about_group.add(&info_jotta_ver_row);
+    about_group.add(&info_app_ver_row);
+
+    let settings_page = build_settings_page(toast_tx.clone(), &account_group, &about_group, &scan_row);
     stack.add_titled(&settings_page, Some("settings"), i18n::t("nav.settings"));
 
     sidebar.connect_row_selected(clone!(
@@ -536,10 +557,8 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     0 => Some("status"),
                     1 => Some("backup"),
                     2 => Some("sync"),
-                    3 => Some("transfers"),
-                    4 => Some("restore"),
-                    5 => Some("info"),
-                    6 => Some("settings"),
+                    3 => Some("transfers_restore"),
+                    4 => Some("settings"),
                     _ => None,
                 };
                 if let Some(p) = page {
@@ -600,9 +619,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     "status" => Some(i18n::t("nav.status")),
                     "backup" => Some(i18n::t("nav.backup")),
                     "sync" => Some(i18n::t("nav.sync")),
-                    "transfers" => Some(i18n::t("nav.transfers")),
-                    "restore" => Some(i18n::t("nav.restore")),
-                    "info" => Some(i18n::t("nav.info")),
+                    "transfers_restore" => Some(i18n::t("nav.transfers_restore")),
                     "settings" => Some(i18n::t("nav.settings")),
                     _ => None,
                 })
@@ -1148,9 +1165,13 @@ Vil du erstatte den?",
         let errors_list = transfers_errors_list.clone();
         let toast_tx = toast_tx.clone();
         // Channel carries (uploads, downloads).
+        // Kanal bærer også live hastigheder (up_rate, down_rate i bytes/s),
+        // udledt som delta af Total−Remaining mellem polls (iteration 14).
         let (tx, rx) = std::sync::mpsc::channel::<(
             Vec<jotta_core::remote::UploadEntry>,
             Vec<jotta_core::remote::DownloadEntry>,
+            u64,
+            u64,
         )>();
         let rx = Arc::new(Mutex::new(rx));
         // Seen errors for dedup (main thread only — Rc<RefCell<HashSet>>).
@@ -1162,11 +1183,22 @@ Vil du erstatte den?",
             let errors_list = errors_list.clone();
             let toast_tx = toast_tx.clone();
             let seen_errors = seen_errors.clone();
+            let speed_label = status_speed_label.clone();
             glib::idle_add_local(move || {
                 let rx = rx.lock().unwrap();
-                while let Ok((uploads, downloads)) = rx.try_recv() {
+                while let Ok((uploads, downloads, up_rate, down_rate)) = rx.try_recv() {
                     rebuild_uploads_list(&uploads_list, &uploads);
                     rebuild_transfers_downloads_list(&downloads_list, &downloads);
+                    // Live hastighed på Status-fanen: "—" når idle.
+                    speed_label.set_text(if up_rate == 0 && down_rate == 0 {
+                        "—"
+                    } else {
+                        &tf!(
+                            "status.speed.format",
+                            i18n::format_rate(down_rate),
+                            i18n::format_rate(up_rate)
+                        )
+                    });
                     // Derive errors from entries (no separate CLI call needed).
                     let errors = jotta_core::remote::collect_transfer_errors(&downloads, &uploads);
                     rebuild_transfer_errors_list(&errors_list, &errors);
@@ -1185,24 +1217,47 @@ Vil du erstatte den?",
         }
         {
             let shutdown = shutdown.clone();
-            std::thread::spawn(move || loop {
-                if shutdown.load(Ordering::SeqCst) {
-                    break;
+            std::thread::spawn(move || {
+                // Sidste sample til hastighedsberegning (kun denne tråd rører den).
+                let mut last: Option<(std::time::Instant, u64, u64)> = None;
+                loop {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Some(loc) = BinaryLocator::from_path() {
+                        let client = CliClient::new(loc);
+                        // VERIFICeret: `list uploads --json` returnerer `{}` ved ingen uploads.
+                        let uploads = client
+                            .run_json(&JottaCommand::ListUploads)
+                            .map(|v| jotta_core::remote::parse_uploads_json(&v))
+                            .unwrap_or_default();
+                        let downloads = client
+                            .run_json(&JottaCommand::ListDownloads)
+                            .map(|v| jotta_core::remote::parse_downloads_json(&v))
+                            .unwrap_or_default();
+                        // Live hastighed = delta(overførte bytes) / delta(tid).
+                        let up_done = jotta_core::remote::total_bytes_done_uploads(&uploads);
+                        let down_done = jotta_core::remote::total_bytes_done_downloads(&downloads);
+                        let now = std::time::Instant::now();
+                        let (up_rate, down_rate) = match last {
+                            Some((prev_t, prev_up, prev_down)) => {
+                                let dt = now.duration_since(prev_t).as_secs_f64();
+                                if dt > 0.0 {
+                                    (
+                                        (up_done.saturating_sub(prev_up) as f64 / dt) as u64,
+                                        (down_done.saturating_sub(prev_down) as f64 / dt) as u64,
+                                    )
+                                } else {
+                                    (0, 0)
+                                }
+                            }
+                            None => (0, 0),
+                        };
+                        last = Some((now, up_done, down_done));
+                        let _ = tx.send((uploads, downloads, up_rate, down_rate));
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
                 }
-                if let Some(loc) = BinaryLocator::from_path() {
-                    let client = CliClient::new(loc);
-                    // VERIFICeret: `list uploads --json` returnerer `{}` ved ingen uploads.
-                    let uploads = client
-                        .run_json(&JottaCommand::ListUploads)
-                        .map(|v| jotta_core::remote::parse_uploads_json(&v))
-                        .unwrap_or_default();
-                    let downloads = client
-                        .run_json(&JottaCommand::ListDownloads)
-                        .map(|v| jotta_core::remote::parse_downloads_json(&v))
-                        .unwrap_or_default();
-                    let _ = tx.send((uploads, downloads));
-                }
-                std::thread::sleep(Duration::from_secs(5));
             });
         }
     }
@@ -1691,8 +1746,7 @@ fn build_status_page(
     usage_label: &gtk::Label,
     pause_switch: &gtk::Switch,
     daemon_banner: &adw::Banner,
-    login_row: &adw::ActionRow,
-    logout_row: &adw::ActionRow,
+    speed_label: &gtk::Label,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
@@ -1719,8 +1773,13 @@ fn build_status_page(
     email_label.add_css_class("dim-label");
     account_group.add(&state_row);
     account_group.add(&email_row);
-    account_group.add(login_row);
-    account_group.add(logout_row);
+    // Live hastighed (iteration 14): ↓ ned / ↑ op — "—" når idle.
+    let speed_row = adw::ActionRow::builder()
+        .title(i18n::t("status.speed.row"))
+        .build();
+    speed_row.add_suffix(speed_label);
+    speed_label.set_halign(gtk::Align::End);
+    account_group.add(&speed_row);
     box_.append(&account_group);
 
     // Pause/resume: positiv formulering — ON = automatisk aktiv.
@@ -1763,13 +1822,14 @@ fn build_status_page(
     scrollable_page(&box_.upcast()).upcast()
 }
 
-fn build_backup_page(list: &gtk::ListBox) -> gtk::Widget {
+fn build_backup_page(list: &gtk::ListBox, schedule_group: &adw::PreferencesGroup) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
 
     // Ingen indre ScrolledWindow — listen ligger direkte i boksen.
     // ydre scrollable_page håndterer overflow. Undgår dobbelt scroll.
     box_.append(list);
+    box_.append(schedule_group);
 
     scrollable_page(&box_.upcast()).upcast()
 }
@@ -1785,17 +1845,53 @@ fn build_sync_page(group: &adw::PreferencesGroup) -> gtk::Widget {
 // Overførsler (transfers) page
 // ---------------------------------------------------------------------------
 
-fn build_transfers_page(
+/// Iteration 14 (SPEC §3): Overførsler & Gendan smeltet sammen til én fane.
+/// Øverst: aktive uploads/downloads + fejl. Nederst: remote browser + downloads + papirkurv.
+#[allow(clippy::too_many_arguments)]
+fn build_transfers_restore_page(
     uploads_group: &adw::PreferencesGroup,
     downloads_group: &adw::PreferencesGroup,
     errors_group: &adw::PreferencesGroup,
+    path_box: &gtk::Box,
+    remote_scrolled: &gtk::ScrolledWindow,
+    download_group: &adw::PreferencesGroup,
+    rest_downloads_group: &adw::PreferencesGroup,
+    rest_downloads_list: &gtk::ListBox,
+    trash_group: &adw::PreferencesGroup,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
-    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
+
+    // --- Overførsler-sektion ---
+    let transfers_title = gtk::Label::new(Some(i18n::t("page.transfers.heading")));
+    transfers_title.set_halign(gtk::Align::Start);
+    transfers_title.add_css_class("heading");
+    box_.append(&transfers_title);
     box_.append(uploads_group);
     box_.append(downloads_group);
     box_.append(errors_group);
+
+    // --- Gendan-sektion (remote browser) ---
+    let browser_title = gtk::Label::new(Some(i18n::t("restore.browser.title")));
+    browser_title.set_halign(gtk::Align::Start);
+    browser_title.add_css_class("heading");
+    box_.append(&browser_title);
+    box_.append(path_box);
+    box_.append(remote_scrolled);
+    box_.append(download_group);
+
+    let downloads_title = gtk::Label::new(Some(i18n::t("nav.transfers")));
+    downloads_title.set_halign(gtk::Align::Start);
+    downloads_title.add_css_class("heading");
+    rest_downloads_group.add(rest_downloads_list);
+    box_.append(rest_downloads_group);
+
+    let trash_title = gtk::Label::new(Some(i18n::t("restore.trash.title")));
+    trash_title.set_halign(gtk::Align::Start);
+    trash_title.add_css_class("heading");
+    box_.append(&trash_title);
+    box_.append(trash_group);
+
     scrollable_page(&box_.upcast()).upcast()
 }
 
@@ -1936,18 +2032,6 @@ fn nav_item(label: &str, icon_name: &str) -> gtk::Widget {
     row_box.append(&icon);
     row_box.append(&lbl);
     row_box.upcast()
-}
-
-// ---------------------------------------------------------------------------
-// Info page
-// ---------------------------------------------------------------------------
-
-fn build_info_page(group: &adw::PreferencesGroup) -> gtk::Widget {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    set_margin_all(&box_, 24);
-    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
-    box_.append(group);
-    scrollable_page(&box_.upcast()).upcast()
 }
 
 /// Sæt en værdi som subtitle på en ActionRow (Info-page værdier).
@@ -2093,7 +2177,14 @@ fn set_tray_visibility(visible: bool) -> String {
 
 /// Byg Indstillinger-siden: minimize-to-tray, start ved login, vis tray-ikon,
 /// avancerede jottad-indstillinger (uploadrate/downloadrate/scaninterval).
-fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget {
+#[allow(clippy::too_many_arguments)]
+fn build_settings_page(
+    toast_tx: std::sync::mpsc::Sender<String>,
+    account_group: &adw::PreferencesGroup,
+    about_group: &adw::PreferencesGroup,
+    scan_row: &adw::EntryRow,
+) -> gtk::Widget {
+    let scan_row = scan_row.clone(); // owned — bruges af closures længere nede
     let group = adw::PreferencesGroup::builder()
         .title(i18n::t("settings.general.group"))
         .build();
@@ -2192,6 +2283,25 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     tray_row.add_suffix(&tray_switch);
     tray_row.set_activatable_widget(Some(&tray_switch));
     group.add(&tray_row);
+
+    // Sort/hvidt tray-ikon (iteration 14, Nextcloud-stil): skriver tray_icon_mono
+    // til samme settings.conf, som jotta-tray læser ved hvert poll.
+    let mono_row = adw::ActionRow::builder()
+        .title(i18n::t("settings.tray.mono.title"))
+        .subtitle(i18n::t("settings.tray.mono.subtitle"))
+        .build();
+    let mono_switch = gtk::Switch::new();
+    mono_switch.set_valign(gtk::Align::Center);
+    mono_switch.set_active(read_bool_setting(&config_path, "tray_icon_mono").unwrap_or(false));
+    mono_switch.connect_state_set(move |sw, state| {
+        write_bool_setting(&settings_conf_path(), "tray_icon_mono", state);
+        sw.set_active(state);
+        Propagation::Proceed
+    });
+    mono_row.add_suffix(&mono_switch);
+    mono_row.set_activatable_widget(Some(&mono_switch));
+    group.add(&mono_row);
+
     // Ved opstart: hvis pref er FRA, sørg for at tray heller ikke kører nu.
     if !tray_visible {
         std::thread::spawn(|| {
@@ -2220,12 +2330,9 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
         .build();
     let up_row = adw::EntryRow::builder().title(i18n::t("settings.bandwidth.up")).build();
     let down_row = adw::EntryRow::builder().title(i18n::t("settings.bandwidth.down")).build();
-    let scan_row = adw::EntryRow::builder()
-        .title(i18n::t("settings.scaninterval"))
-        .build();
     adv_group.add(&up_row);
     adv_group.add(&down_row);
-    adv_group.add(&scan_row);
+    // scan_row bor på Backup-fanen (Planlægning) — tilføjes ikke her.
     let save_row = adw::ActionRow::builder()
         .title(i18n::t("settings.save.advanced.title"))
         .build();
@@ -2305,7 +2412,9 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_widget, 12);
     box_widget.append(&group);
+    box_widget.append(account_group);
     box_widget.append(&adv_group);
+    box_widget.append(about_group);
     scrollable_page(&box_widget.upcast()).upcast()
 }
 
@@ -2913,47 +3022,6 @@ fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
 // ---------------------------------------------------------------------------
 // Gendan (restore/download) page
 // ---------------------------------------------------------------------------
-
-fn build_restore_page(
-    path_box: &gtk::Box,
-    remote_scrolled: &gtk::ScrolledWindow,
-    download_group: &adw::PreferencesGroup,
-    downloads_group: &adw::PreferencesGroup,
-    downloads_list: &gtk::ListBox,
-    trash_group: &adw::PreferencesGroup,
-) -> gtk::Widget {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    set_margin_all(&box_, 24);
-
-    // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
-
-    // Remote browser section
-    let browser_title = gtk::Label::new(Some(i18n::t("restore.browser.title")));
-    browser_title.set_halign(gtk::Align::Start);
-    browser_title.add_css_class("heading");
-    box_.append(&browser_title);
-    box_.append(path_box);
-    box_.append(remote_scrolled);
-
-    // Download section
-    box_.append(download_group);
-
-    // Downloads section
-    let downloads_title = gtk::Label::new(Some(i18n::t("nav.transfers")));
-    downloads_title.set_halign(gtk::Align::Start);
-    downloads_title.add_css_class("heading");
-    downloads_group.add(downloads_list);
-    box_.append(downloads_group);
-
-    // Trash section (web-only — no list UI).
-    let trash_title = gtk::Label::new(Some(i18n::t("restore.trash.title")));
-    trash_title.set_halign(gtk::Align::Start);
-    trash_title.add_css_class("heading");
-    box_.append(&trash_title);
-    box_.append(trash_group);
-
-    scrollable_page(&box_.upcast()).upcast()
-}
 
 /// Navigation result from a worker thread: plain data only.
 /// Carries the parsed `ls --json` result, the static root entries,

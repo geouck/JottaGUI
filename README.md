@@ -102,7 +102,7 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 13 (i18n da/en) in progress — PR #19 draft; iterations 9–12 merged (PR #13, #15–#18)
+## Status: iteration 14 (UI redesign 7→5 + live speed + mono tray icon) in progress — PR #20 draft; iterations 9–13 merged (PR #13, #15–#19)
 
 Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md` (§4 has the parity matrix).
 
@@ -156,6 +156,15 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
 - [x] Polish (iteration 12, PR #18): "Log ud" with confirm dialog, "Vis tray-ikon"
       toggle (`tray_visible`), Avanceret (uploadrate/downloadrate/scaninterval via
       `jotta-cli config`), adaptive status poll (3 s active / 10 s idle)
+- [x] i18n da/en (iteration 13, PR #19): built-in locale catalog, system-locale detect
+- [x] UI redesign 7→5 tabs (iteration 14, PR #20, SPEC.md §3): sidebar is now
+      Status / Backup / Sync / **Overførsler & Gendan** (merged) / Indstillinger;
+      the old Info page became "Konto & enhed" + "Om" groups inside Indstillinger;
+      scaninterval moved to a "Planlægning" group on the Backup page
+- [x] Live up/down speed (iteration 14): from Total−Remaining deltas between polls;
+      shown as "↓ x · ↑ y" on the Status page and in the tray menu (when active)
+- [x] Black/white tray icon toggle (iteration 14): "Sort/hvidt tray-ikon" switch in
+      Indstillinger (`tray_icon_mono` in settings.conf, read by the tray each poll)
 
 ### Next (per SPEC.md)
 
@@ -163,7 +172,6 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
       `jotta-cli`/`jottad` (repo.jotta.cloud) + SHA256, unpacked to `/app/extra`
       at install time (Flathub rejects host-dependent apps); mail
       support@jottacloud.com re: extra-data/bundling acceptance + logo rules
-- [ ] UI redesign 7→5 sidebar tabs (SPEC.md §3)
 
 ### i18n — DONE (iteration 13, PR #19 draft; SPEC.md §4)
 
@@ -181,17 +189,11 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
 ### Even later
 
 - [ ] COPR + AUR packaging
-- [ ] Advanced settings (bandwidth limit, scan interval, realtime mode)
-- [ ] Account page (subscription, usage breakdown, "Log ud")
-- [ ] Page consolidation (Status+Account, Status+Info)
-- [ ] Tray icon color (black/white, Nextcloud-style)
-- [ ] "Gendan gammel version" UI (revisions parsed, no UI yet)
-- [ ] KSNI menu enhancements (device list, activity, live up/down speed next to
-      the status line — owner request after PR #18; pause/resume is already there)
+- [ ] "Gendan gammel version" UI (revisions parsed, no UI yet — needs verified
+      `jotta-cli download --revision=…` support first)
+- [ ] KSNI menu enhancements (device list, activity)
 - [ ] Notifications: stack or dynamically replace each other instead of a fixed
-      delay (owner observation after PR #18)
-- [ ] "Vis tray-ikon" button in Indstillinger (verify/respawn jotta-tray via PID
-      file; AppIndicator hint on GNOME)
+      delay (owner observation after PR #18; toasts already replace text instantly)
 - [ ] Snapshot/restore points
 - [ ] Desktop notifications for errors
 

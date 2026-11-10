@@ -24,6 +24,32 @@ mod pixmaps;
 struct AppState {
     status: Status,
     err: Option<String>,
+    /// Live transfer rates in bytes/s (iteration 14), from Total-Remaining deltas.
+    up_rate: u64,
+    down_rate: u64,
+}
+
+/// Sort/hvidt tray-ikon (iteration 14): læses fra samme settings.conf som GUI'en
+/// skriver (tray_icon_mono=true). Standard FRA (farvede tilstandsikoner).
+fn tray_mono() -> bool {
+    let path = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("tray_icon_mono="))
+                .map(|l| l.trim_end() == "tray_icon_mono=true")
+        })
+        .unwrap_or(false)
 }
 
 /// Localized one-line status for menu + tooltip (mirrors Status::tooltip,
@@ -49,7 +75,11 @@ struct JottaTray {
 }
 
 impl JottaTray {
-    fn icon_for(state: State) -> &'static str {
+    fn icon_for(state: State, mono: bool) -> &'static str {
+        // Sort/hvidt (mono) tilvalg (iteration 14): ét symbolic-ikon uanset tilstand.
+        if mono {
+            return "io.github.eske.JottaDesktop-symbolic";
+        }
         // App-id-named icons: flatpak only exports icons whose filename starts
         // with the app-id, and native installs ship both names, so these work
         // everywhere (the embedded pixmap is the ultimate fallback).
@@ -69,7 +99,7 @@ impl Tray for JottaTray {
     }
 
     fn icon_name(&self) -> String {
-        Self::icon_for(self.state.lock().unwrap().status.state).to_string()
+        Self::icon_for(self.state.lock().unwrap().status.state, tray_mono()).to_string()
     }
 
     fn icon_theme_path(&self) -> String {
@@ -115,7 +145,7 @@ impl Tray for JottaTray {
             None => status_line(&s.status),
         };
         ToolTip {
-            icon_name: Self::icon_for(s.status.state).to_string(),
+            icon_name: Self::icon_for(s.status.state, tray_mono()).to_string(),
             title: "Jotta Desktop".into(),
             description,
             ..Default::default()
@@ -126,14 +156,28 @@ impl Tray for JottaTray {
         let s = self.state.lock().unwrap();
         let quit = Arc::clone(&self.quit);
         let close_gui_on_quit = Arc::clone(&self.close_gui_on_quit);
-        vec![
-            StandardItem {
-                label: i18n::tf("tray.status", &[&status_line(&s.status)]),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
+        let mut items: Vec<MenuItem<Self>> = vec![StandardItem {
+            label: i18n::tf("tray.status", &[&status_line(&s.status)]),
+            enabled: false,
+            ..Default::default()
+        }
+        .into()];
+        // Live up/down-hastighed (iteration 14) — vises kun når der overføres noget.
+        if s.up_rate > 0 || s.down_rate > 0 {
+            items.push(
+                StandardItem {
+                    label: i18n::tf(
+                        "tray.speed",
+                        &[&i18n::format_rate(s.down_rate), &i18n::format_rate(s.up_rate)],
+                    ),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(MenuItem::Separator);
+        items.extend(vec![
             match s.status.paused {
                 Some(true) => StandardItem {
                     label: i18n::t("tray.resume").into(),
@@ -188,7 +232,8 @@ impl Tray for JottaTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -348,7 +393,7 @@ fn main() {
         Err(e) => eprintln!("jotta-tray: {e}"),
     }
 
-    let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None }));
+    let state = Arc::new(Mutex::new(AppState { status: Status::default(), err: None, up_rate: 0, down_rate: 0 }));
     let quit = Arc::new(AtomicBool::new(false));
 
     // Minimize-to-tray: læs fra samme konfigurationsfil som GUI'en.
@@ -389,7 +434,10 @@ fn main() {
     let poll_handle = handle.clone();
     let poll_client = CliClient::new(locator.clone());
     let poll_quit = Arc::clone(&quit);
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        // Sidste sample til hastighedsberegning (kun denne tråd rører den).
+        let mut last: Option<(std::time::Instant, u64, u64)> = None;
+        loop {
         if poll_quit.load(Ordering::SeqCst) {
             break;
         }
@@ -414,8 +462,40 @@ fn main() {
                 st.err = Some(e.to_string());
             }
         }
+        // Live up/down-hastighed (iteration 14): to ekstra CLI-kald (jottad cacher
+        // svarene); hastighed = delta(overførte bytes) / delta(tid) mellem polls.
+        let up_done = poll_client
+            .run_json(&JottaCommand::ListUploads)
+            .ok()
+            .map(|v| jotta_core::remote::total_bytes_done_uploads(&jotta_core::remote::parse_uploads_json(&v)));
+        let down_done = poll_client
+            .run_json(&JottaCommand::ListDownloads)
+            .ok()
+            .map(|v| jotta_core::remote::total_bytes_done_downloads(&jotta_core::remote::parse_downloads_json(&v)));
+        if let (Some(up_done), Some(down_done)) = (up_done, down_done) {
+            let now = std::time::Instant::now();
+            let (up_rate, down_rate) = match last {
+                Some((t, pu, pd)) => {
+                    let dt = now.duration_since(t).as_secs_f64();
+                    if dt > 0.0 {
+                        (
+                            (up_done.saturating_sub(pu) as f64 / dt) as u64,
+                            (down_done.saturating_sub(pd) as f64 / dt) as u64,
+                        )
+                    } else {
+                        (0, 0)
+                    }
+                }
+                None => (0, 0),
+            };
+            last = Some((now, up_done, down_done));
+            let mut st = poll_state.lock().unwrap();
+            st.up_rate = up_rate;
+            st.down_rate = down_rate;
+        }
         poll_handle.update(|_tray| {});
         std::thread::sleep(Duration::from_secs(3));
+        }
     });
 
     // Main thread: wait for a quit request from the menu, then shut down cleanly.

@@ -67,6 +67,8 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "nav.sync" => ("Sync", "Sync"),
         "nav.transfers" => ("Overførsler", "Transfers"),
         "nav.restore" => ("Gendan", "Restore"),
+        "nav.transfers_restore" => ("Overførsler & Gendan", "Transfers & Restore"),
+        "page.transfers.heading" => ("Overførsler", "Transfers"),
         "nav.info" => ("Info", "Info"),
         "nav.settings" => ("Indstillinger", "Settings"),
         // --- Common ---
@@ -102,6 +104,8 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "status.usage.of" => ("{} af {} brugt", "{} of {} used"),
         "status.usage.unavailable" => ("Forbrug ikke tilgængeligt", "Usage not available"),
         "status.reload.toast" => ("Genindlæser status…", "Reloading status…"),
+        "status.speed.row" => ("Hastighed", "Speed"),
+        "status.speed.format" => ("↓ {} · ↑ {}", "↓ {} · ↑ {}"),
         // --- Sync page ---
         "sync.switch.title" => ("Kontinuerlig sync", "Continuous sync"),
         "sync.switch.subtitle" => (
@@ -261,6 +265,11 @@ fn catalog(key: &str) -> (&'static str, &'static str) {
         "info.system.group" => ("System", "System"),
         // --- Settings page ---
         "settings.general.group" => ("Generelt", "General"),
+        "settings.account.group" => ("Konto & enhed", "Account & device"),
+        "settings.about.group" => ("Om", "About"),
+        "settings.tray.mono.title" => ("Sort/hvidt tray-ikon", "Black/white tray icon"),
+        "settings.tray.mono.subtitle" => ("Brug det monokrome symbolic-ikon i systembakken", "Use the monochrome symbolic icon in the system tray"),
+        "backup.schedule.group" => ("Planlægning", "Schedule"),
         "settings.mtt.title" => ("Minimer til systembakke ved luk", "Minimize to system tray on close"),
         "settings.mtt.subtitle" => ("Vinduet minimeres til systembakken i stedet for at lukke", "The window minimizes to the system tray instead of closing"),
         "settings.autostart.title" => ("Start ved login", "Start at login"),
@@ -377,6 +386,11 @@ fn format_bytes_lang(n: u64, l: Lang) -> String {
 /// (jotta-core itself stays untouched).
 pub fn format_bytes(n: u64) -> String {
     format_bytes_lang(n, lang())
+}
+
+/// Locale-aware transfer rate ("1,58 MB/s" da / "1.58 MB/s" en).
+pub fn format_rate(bytes_per_sec: u64) -> String {
+    format!("{}/s", format_bytes_lang(bytes_per_sec, lang()))
 }
 
 #[cfg(test)]
