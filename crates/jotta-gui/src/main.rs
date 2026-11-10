@@ -2113,7 +2113,6 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
         let cfg_rx = Arc::new(Mutex::new(cfg_rx));
         std::thread::spawn(move || {
             let v = BinaryLocator::from_path()
-                .ok()
                 .and_then(|loc| CliClient::new(loc).run_text(&JottaCommand::ConfigList).ok())
                 .map(|t| jotta_core::cli::parse_config_lines(&t))
                 .unwrap_or_default();
