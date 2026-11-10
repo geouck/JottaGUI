@@ -209,11 +209,16 @@ fn ensure_tray_running() {
 // Live overførsels-feed (iteration 14, forbedret efter PR #20-test)
 // ---------------------------------------------------------------------------
 // `jotta-cli list uploads --json` viser ikke nødvendigvis sync-triggerede
-// overførsler, og `observe` er CLI'ens egen live-visning (filsti, %, hastighed).
-// Derfor tre kilder, højeste friske vinder:
+// overførsler, `status --json` viser tomme `{}` mens sync arbejder, og
+// `observe` har intet --json på jotta-cli 0.17.x. Derfor FIRE kilder:
+//   source 3 = `sync log --watch` stream — NÆVNER filen der synces lige nu
+//              (ingen bytes; hastighed kommer fra de andre kilder)
 //   source 2 = `observe --json` stream (hvis understøttet — detekteret via --help)
-//   source 1 = `status --json` State.Uploading/Downloading (filsti + byte-tællere)
+//   source 1 = `status --json` State.Uploading/Downloading + TEKST-status
+//              `> Uploads: n (bytes) / n (bytes)` linjer (byte-tællere → hastighed)
 //   source 0 = `list uploads/downloads --json` (Total-Remaining)
+// Hastighed = max over alle friske kilder; listen = højeste friske kilde med
+// overførsler.
 
 /// En igangværende overførsel — ren data der krydser trådgrænsen.
 #[derive(Clone)]
@@ -223,7 +228,8 @@ struct LiveTransfer {
     total: Option<u64>,
 }
 
-/// Ét sample fra én kilde. `source`: 2 = observe, 1 = status, 0 = list.
+/// Ét sample fra én kilde. `source`: 3 = sync log --watch (filnavne),
+/// 2 = observe, 1 = status (json + tekst), 0 = list uploads/downloads.
 #[derive(Clone)]
 struct LiveFeed {
     source: u8,
@@ -489,6 +495,127 @@ fn run_observe_worker(
         std::thread::sleep(Duration::from_secs(5));
     }
     // Shutdown: dræb child hvis den stadig ligger i slotten.
+    let mut slot = child_slot.lock().unwrap();
+    if let Some(mut c) = slot.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+/// Worker-tråd: stream `jotta-cli sync log --watch` (kun hvis `sync --help`
+/// viser `log`) og send LiveFeed-samples (kilde 3) med FILNAVNE ca. 1 gang/s.
+/// Linjer: `2026-01-20 20:10:22 +0100 CET :: Upload /sti/fil` — parseren i
+/// jotta_core::synclog håndterer ANSI-prefikser. Ingen bytes her, så
+/// up_rate/down_rate sættes til 0 (hastighed kommer fra kilde 0/1/2).
+/// Child genstartes ved EOF; dræbes ved shutdown. Read-only.
+fn run_sync_log_worker(
+    shutdown: Arc<AtomicBool>,
+    live_tx: std::sync::mpsc::Sender<LiveFeed>,
+    child_slot: Arc<Mutex<Option<std::process::Child>>>,
+) {
+    use std::io::BufRead as _;
+    let Some(loc) = BinaryLocator::from_path() else {
+        return;
+    };
+    let client = CliClient::new(loc);
+    // Detekér `sync log` én gang (ældre jotta-cli har måske ikke subkommandoen).
+    let supported = client
+        .run_text(&JottaCommand::SyncHelp)
+        .map(|h| jotta_core::synclog::sync_help_lists_log(&h))
+        .unwrap_or(false);
+    if !supported {
+        return;
+    }
+    // path -> (retning, sidst set)
+    let mut recent: std::collections::HashMap<String, (bool, std::time::Instant)> =
+        std::collections::HashMap::new();
+    let mut last_send = std::time::Instant::now() - Duration::from_secs(2);
+
+    'respawn: loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let mut child = match client.spawn_stream(&JottaCommand::SyncLogWatch) {
+            Ok(c) => c,
+            Err(_) => {
+                std::thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+        let stdout = child.stdout.take();
+        {
+            let mut slot = child_slot.lock().unwrap();
+            if let Some(mut old) = slot.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            *slot = Some(child);
+        }
+        let Some(stdout) = stdout else {
+            continue 'respawn;
+        };
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break 'respawn;
+            }
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Some(ev) = jotta_core::synclog::parse_sync_log_line(&line) {
+                        use jotta_core::synclog::SyncLogAction;
+                        let is_up = match ev.action {
+                            SyncLogAction::Upload => Some(true),
+                            SyncLogAction::Download => Some(false),
+                            _ => None,
+                        };
+                        if let (Some(up), false) = (is_up, ev.path.is_empty()) {
+                            recent.insert(ev.path, (up, std::time::Instant::now()));
+                        }
+                    }
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_send) >= Duration::from_secs(1) {
+                        last_send = now;
+                        // Fjern stier uden events i > 10 s (færdige overførsler).
+                        recent.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 10);
+                        let mut uploads = Vec::new();
+                        let mut downloads = Vec::new();
+                        for (path, (up, _)) in &recent {
+                            let lt = LiveTransfer {
+                                path: path.clone(),
+                                bytes_done: None,
+                                total: None,
+                            };
+                            if *up {
+                                uploads.push(lt);
+                            } else {
+                                downloads.push(lt);
+                            }
+                        }
+                        let _ = live_tx.send(LiveFeed {
+                            source: 3,
+                            uploads,
+                            downloads,
+                            up_rate: 0,
+                            down_rate: 0,
+                        });
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        {
+            let mut slot = child_slot.lock().unwrap();
+            if let Some(mut c) = slot.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        recent.clear();
+        std::thread::sleep(Duration::from_secs(5));
+    }
     let mut slot = child_slot.lock().unwrap();
     if let Some(mut c) = slot.take() {
         let _ = c.kill();
@@ -1523,11 +1650,12 @@ Vil du erstatte den?",
     // KRÆVER --downloadid/--uploadid — der er ingen "list alle"-mode.
     // Fejlbeskeder udledes därfor fra hver entry's "Errors"-objekt via
     // jotta_core::remote::collect_transfer_errors().
-    // --- Live overførsels-feed: én kanal, tre kilder (se LiveFeed ovenfor) ---
-    // source 2 = observe --json stream, 1 = status --json, 0 = list uploads/downloads.
+    // --- Live overførsels-feed: én kanal, fire kilder (se LiveFeed ovenfor) ---
+    // source 3 = sync log --watch stream, 2 = observe --json, 1 = status, 0 = list.
     let (live_tx, live_rx) = std::sync::mpsc::channel::<LiveFeed>();
-    // Child-handle til evt. kørende `observe --json` — dræbes ved luk.
+    // Child-handles til evt. kørende streams — dræbes ved luk.
     let observe_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let synclog_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
 
     // Error dedup: only toast NEW errors (tracked in a HashSet on main thread).
     {
@@ -1653,16 +1781,16 @@ Vil du erstatte den?",
         }
     }
 
-    // --- Live-feed forbruger på main loop + observe-worker (kilde 2) ---
+    // --- Live-feed forbruger på main loop + observe/sync-log-workers ---
     {
         let live_rx = Arc::new(Mutex::new(live_rx));
         struct LiveUiState {
-            latest: [Option<LiveFeed>; 3],
-            seen: [Option<std::time::Instant>; 3],
+            latest: [Option<LiveFeed>; 4],
+            seen: [Option<std::time::Instant>; 4],
         }
         let state = std::rc::Rc::new(std::cell::RefCell::new(LiveUiState {
-            latest: [None, None, None],
-            seen: [None, None, None],
+            latest: [None, None, None, None],
+            seen: [None, None, None, None],
         }));
         let speed_label = status_speed_label.clone();
         let current_row = status_current_row.clone();
@@ -1675,22 +1803,50 @@ Vil du erstatte den?",
                 let rx = live_rx.lock().unwrap();
                 let mut st = state.borrow_mut();
                 while let Ok(feed) = rx.try_recv() {
-                    let s = (feed.source as usize).min(2);
+                    let s = (feed.source as usize).min(3);
                     st.latest[s] = Some(feed);
                     st.seen[s] = Some(now);
                 }
             }
-            // Højeste kilde med frisk sample (< 6 s) vinder. Borrow slippes før GTK-kald.
+            // Friske kilder (< 6 s). Borrow slippes før GTK-kald.
+            // Hastighed = max over alle friske kilder (kilde 3 sync-log har
+            // filnavne men ingen bytes, så dens rate er 0).
+            // Listen = højeste friske kilde DER HAR overførsler.
             let feed = {
                 let st = state.borrow();
-                (0..=2usize)
-                    .rev()
-                    .find(|&s| {
+                let fresh: Vec<usize> = (0..=3usize)
+                    .filter(|&s| {
                         st.seen[s]
                             .map(|t| now.duration_since(t).as_secs() < 6)
                             .unwrap_or(false)
                     })
-                    .and_then(|s| st.latest[s].clone())
+                    .collect();
+                if fresh.is_empty() {
+                    None
+                } else {
+                    let (mut up_rate, mut down_rate) = (0u64, 0u64);
+                    for &s in &fresh {
+                        if let Some(f) = &st.latest[s] {
+                            up_rate = up_rate.max(f.up_rate);
+                            down_rate = down_rate.max(f.down_rate);
+                        }
+                    }
+                    let has_transfers = |f: &LiveFeed| {
+                        f.uploads.iter().any(|t| !t.path.is_empty())
+                            || f.downloads.iter().any(|t| !t.path.is_empty())
+                    };
+                    fresh
+                        .iter()
+                        .rev()
+                        .find(|&&s| st.latest[s].map(|f| has_transfers(f)).unwrap_or(false))
+                        .or_else(|| fresh.iter().rev().next())
+                        .and_then(|&s| st.latest[s].clone())
+                        .map(|mut f| {
+                            f.up_rate = up_rate;
+                            f.down_rate = down_rate;
+                            f
+                        })
+                }
             };
             if let Some(feed) = feed {
                 apply_live_feed(
@@ -1710,6 +1866,12 @@ Vil du erstatte den?",
         let live_tx = live_tx.clone();
         let observe_child = observe_child.clone();
         std::thread::spawn(move || run_observe_worker(shutdown, live_tx, observe_child));
+    }
+    {
+        let shutdown = shutdown.clone();
+        let live_tx = live_tx.clone();
+        let synclog_child = synclog_child.clone();
+        std::thread::spawn(move || run_sync_log_worker(shutdown, live_tx, synclog_child));
     }
 
     // Daemon banner: "Genindlæs" knap trigger et nyt status-poll.
@@ -1829,12 +1991,20 @@ Vil du erstatte den?",
                 // PR #14-mapping også i tråd-polleren: "Not logged in" -> NeedsLogin
                 Err(e) => Status::from_cli_error(&e),
             };
-            // Live-feed kilde 1 (status --json): State.Uploading/Downloading giver
-            // filsti + byte-tællere — også for sync-triggerede overførsler, som
-            // `list uploads` ikke nødvendigvis viser. Hastighed = delta mellem polls.
+            // Live-feed kilde 1 (status): State.Uploading/Downloading i JSON giver
+            // filsti + byte-tællere, MEN mens sync arbejder står der tomme `{}` i
+            // JSON — så supplerer vi med TEKST-status `> Uploads: n (bytes) / n (bytes)`
+            // linjer (verificeret i det vilde), der viser byte-fremskridt også for
+            // sync-triggerede overførsler. Hastighed = delta mellem polls.
             {
-                let up_done = status.active_upload_bytes_done();
-                let down_done = status.active_download_bytes_done();
+                let text_prog = poll_client
+                    .run_text(&JottaCommand::StatusText)
+                    .map(|t| jotta_core::textstatus::parse_status_text_progress(&t))
+                    .unwrap_or_default();
+                let text_up = jotta_core::textstatus::done_bytes_for(&text_prog, "upload");
+                let text_down = jotta_core::textstatus::done_bytes_for(&text_prog, "download");
+                let up_done = status.active_upload_bytes_done().max(text_up);
+                let down_done = status.active_download_bytes_done().max(text_down);
                 let now = std::time::Instant::now();
                 let (up_rate, down_rate) = match last_live {
                     Some((t, pu, pd)) => {
@@ -1851,26 +2021,52 @@ Vil du erstatte den?",
                     None => (0, 0),
                 };
                 last_live = Some((now, up_done, down_done));
+                // Fil-liste: JSON-transfers hvis de findes, ellers aggregerede
+                // tekst-status-rækker (label som "navn", f.eks. "Uploads").
+                let mut up_list: Vec<LiveTransfer> = status
+                    .active_uploads
+                    .iter()
+                    .map(|t| LiveTransfer {
+                        path: t.path.clone().unwrap_or_default(),
+                        bytes_done: t.bytes_done,
+                        total: t.total_bytes,
+                    })
+                    .collect();
+                if up_list.is_empty() {
+                    up_list = text_prog
+                        .iter()
+                        .filter(|p| p.label_is("upload") && (p.total_bytes > 0 || p.done_bytes > 0))
+                        .map(|p| LiveTransfer {
+                            path: p.label.clone(),
+                            bytes_done: Some(p.done_bytes),
+                            total: Some(p.total_bytes),
+                        })
+                        .collect();
+                }
+                let mut down_list: Vec<LiveTransfer> = status
+                    .active_downloads
+                    .iter()
+                    .map(|t| LiveTransfer {
+                        path: t.path.clone().unwrap_or_default(),
+                        bytes_done: t.bytes_done,
+                        total: t.total_bytes,
+                    })
+                    .collect();
+                if down_list.is_empty() {
+                    down_list = text_prog
+                        .iter()
+                        .filter(|p| p.label_is("download") && (p.total_bytes > 0 || p.done_bytes > 0))
+                        .map(|p| LiveTransfer {
+                            path: p.label.clone(),
+                            bytes_done: Some(p.done_bytes),
+                            total: Some(p.total_bytes),
+                        })
+                        .collect();
+                }
                 let feed = LiveFeed {
                     source: 1,
-                    uploads: status
-                        .active_uploads
-                        .iter()
-                        .map(|t| LiveTransfer {
-                            path: t.path.clone().unwrap_or_default(),
-                            bytes_done: t.bytes_done,
-                            total: t.total_bytes,
-                        })
-                        .collect(),
-                    downloads: status
-                        .active_downloads
-                        .iter()
-                        .map(|t| LiveTransfer {
-                            path: t.path.clone().unwrap_or_default(),
-                            bytes_done: t.bytes_done,
-                            total: t.total_bytes,
-                        })
-                        .collect(),
+                    uploads: up_list,
+                    downloads: down_list,
                     up_rate,
                     down_rate,
                 };
@@ -1923,6 +2119,7 @@ Vil du erstatte den?",
         let gui_pid_file = gui_pid_file.clone();
         let window = window.clone();
         let observe_child = observe_child.clone();
+        let synclog_child = synclog_child.clone();
         window.connect_close_request(move |window| {
             // Læs minimize-to-tray indstilling
             let config_path = std::env::var("XDG_CONFIG_HOME")
@@ -1952,6 +2149,10 @@ Vil du erstatte den?",
                 // Normal luk: afslut processen (dræb evt. observe-stream først).
                 shutdown.store(true, Ordering::SeqCst);
                 if let Some(mut c) = observe_child.lock().unwrap().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                if let Some(mut c) = synclog_child.lock().unwrap().take() {
                     let _ = c.kill();
                     let _ = c.wait();
                 }

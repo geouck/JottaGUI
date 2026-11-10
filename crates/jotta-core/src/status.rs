@@ -92,15 +92,37 @@ fn parse_active_transfers(v: Option<&Value>) -> Vec<ActiveTransfer> {
             .iter()
             .find_map(|k| obj.as_str_ci(k))
             .map(str::to_owned);
+        // Key names verified against a working third-party widget
+        // (lorentzfb/omarchy-jottacloud) reading the ACTIVE schema of
+        // State.Uploading / Backups[].Uploading maps:
+        //   total = TotalBytes | Bytes | Total.Bytes | Size
+        //   done  = CompletedBytes | Completed.Bytes | Progress
+        // Extra best-effort guesses are kept below those.
+        let nested_bytes = |key: &str| -> Option<u64> {
+            let as_u = |v: &Value| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64);
+            match obj.get_ci(key) {
+                Some(Value::Object(inner)) => inner.values().find_map(as_u),
+                Some(n) => as_u(n),
+                None => None,
+            }
+        };
+        let total = ["TotalBytes", "TotalSize", "FileSize", "Size"]
+            .iter()
+            .find_map(|k| obj.as_u64_ci(k))
+            .or_else(|| nested_bytes("Total"))
+            .or_else(|| obj.as_u64_ci("Bytes"));
         let bytes_done = [
-            "BytesDone", "Done", "Uploaded", "Downloaded", "Transferred", "BytesTransferred", "Bytes",
-            "Progress",
+            "CompletedBytes", "BytesDone", "Done", "Uploaded", "Downloaded", "Transferred",
+            "BytesTransferred", "Progress",
         ]
         .iter()
-        .find_map(|k| obj.as_u64_ci(k));
-        let total = ["TotalBytes", "Total", "Size", "FileSize", "TotalSize"]
-            .iter()
-            .find_map(|k| obj.as_u64_ci(k));
+        .find_map(|k| obj.as_u64_ci(k))
+        .or_else(|| nested_bytes("Completed"))
+        // "Bytes" as done ONLY when it was not already consumed as total.
+        .or_else(|| {
+            let b = obj.as_u64_ci("Bytes");
+            if total.is_some() && total != b { b } else { None }
+        });
         if path.is_some() || bytes_done.is_some() || total.is_some() {
             return Some(ActiveTransfer {
                 path,
@@ -663,6 +685,33 @@ mod tests {
         // Backup folder list still parsed as before.
         assert_eq!(s.backups.len(), 1);
         assert_eq!(s.backups[0].name, "Documents");
+    }
+
+    #[test]
+    fn active_transfers_match_widget_verified_keys() {
+        // Active-schema keys as used by lorentzfb/omarchy-jottacloud:
+        // total = TotalBytes|Bytes|Total.Bytes|Size, done = CompletedBytes|Completed.Bytes|Progress.
+        let v = json::parse(
+            r#"{"State": {"Uploading": {
+                "u-1": {"Path": "/sync/a.bin", "TotalBytes": 5000, "CompletedBytes": 1200},
+                "u-2": {"Path": "/sync/b.bin", "Bytes": 8000, "Progress": 2000},
+                "u-3": {"Path": "/sync/c.bin", "Size": 900, "Completed": {"Bytes": 300}}
+            }, "Downloading": {}}}"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert_eq!(s.active_uploads.len(), 3);
+        let a = s.active_uploads.iter().find(|t| t.path.as_deref() == Some("/sync/a.bin")).unwrap();
+        assert_eq!(a.bytes_done, Some(1200));
+        assert_eq!(a.total_bytes, Some(5000));
+        let b = s.active_uploads.iter().find(|t| t.path.as_deref() == Some("/sync/b.bin")).unwrap();
+        assert_eq!(b.bytes_done, Some(2000));
+        assert_eq!(b.total_bytes, Some(8000)); // "Bytes" is the TOTAL in this schema
+        let c = s.active_uploads.iter().find(|t| t.path.as_deref() == Some("/sync/c.bin")).unwrap();
+        assert_eq!(c.bytes_done, Some(300));
+        assert_eq!(c.total_bytes, Some(900));
+        assert!(s.active_transfers_have_byte_counters());
+        assert_eq!(s.active_upload_bytes_done(), 3500);
     }
 
     #[test]

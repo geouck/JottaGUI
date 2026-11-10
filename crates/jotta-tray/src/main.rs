@@ -474,8 +474,10 @@ fn main() {
         // PRIMÆRT fra State.Uploading/Downloading i status --json — det er den
         // eneste kilde der også viser sync-triggerede overførsler med filsti og
         // byte-tællere. FALLBACK: list uploads/downloads --json (Total-Remaining).
+        // SUPPLEMENT: TEKST-status `> Uploads: n (bytes) / n (bytes)` viser også
+        // byte-fremskridt mens sync arbejder, hvor JSON kun har tomme {}.
         // Hastighed = delta(overførte bytes) / delta(tid) mellem polls.
-        let (up_done, down_done) = {
+        let (mut up_done, mut down_done) = {
             let st = poll_state.lock().unwrap();
             let s = &st.status;
             if s.active_transfers_have_byte_counters() {
@@ -498,6 +500,13 @@ fn main() {
                 (up, down)
             }
         };
+        // Tekst-status `jotta-cli status` (ikke --json): `> Uploads:`/`> Downloads:`
+        // byte-tællere — tændt mens sync kører selv når JSON-Uploading er tom.
+        if let Ok(text) = poll_client.run_text(&JottaCommand::StatusText) {
+            let prog = jotta_core::textstatus::parse_status_text_progress(&text);
+            up_done = up_done.max(jotta_core::textstatus::done_bytes_for(&prog, "upload"));
+            down_done = down_done.max(jotta_core::textstatus::done_bytes_for(&prog, "download"));
+        }
         {
             let now = std::time::Instant::now();
             let (up_rate, down_rate) = match last {

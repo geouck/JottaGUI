@@ -21,5 +21,7 @@ pub mod login;
 pub mod observe;
 pub mod remote;
 pub mod status;
+pub mod synclog;
+pub mod textstatus;
 
 pub use error::{Error, Result};

@@ -224,6 +224,21 @@ pub enum JottaCommand {
     /// `ObserveHelp` advertised `--json`; read stdout line by line and kill
     /// the child on shutdown (see `CliClient::spawn_stream`).
     ObserveJson,
+    /// `status` (plain text, NO --json) — while sync is working it prints
+    /// `> Uploads : n (bytes) / n (bytes)` working-progress lines that the
+    /// JSON form hides behind an empty object. Parsed by
+    /// `textstatus::parse_status_text_progress` for live byte counters.
+    /// Read-only.
+    StatusText,
+    /// `sync --help` — run once to detect whether the `sync log` subcommand
+    /// exists (see `synclog::sync_help_lists_log`). Read-only.
+    SyncHelp,
+    /// `sync log --watch` — long-lived read-only stream of sync events
+    /// (`2026-01-20 20:10:22 +0100 CET :: Upload /path/file`), the only CLI
+    /// source that NAMES the file currently syncing. Spawn with
+    /// `spawn_stream`, parse with `synclog::parse_sync_log_line`, kill the
+    /// child on shutdown.
+    SyncLogWatch,
     /// `list downloaderrors [--downloadid=<id>] [--json]` — error details
     /// for failed downloads. With no filter, lists all download errors.
     ListDownloadErrors { download_id: Option<String>, json: bool },
@@ -357,6 +372,9 @@ impl JottaCommand {
             JottaCommand::ListUploads => push(&mut args, &["list", "uploads", "--json"]),
             JottaCommand::ObserveHelp => push(&mut args, &["observe", "--help"]),
             JottaCommand::ObserveJson => push(&mut args, &["observe", "--json"]),
+            JottaCommand::StatusText => push(&mut args, &["status"]),
+            JottaCommand::SyncHelp => push(&mut args, &["sync", "--help"]),
+            JottaCommand::SyncLogWatch => push(&mut args, &["sync", "log", "--watch"]),
             JottaCommand::ListDownloadInfo { download_id, json } => {
                 push(&mut args, &["list", "downloadinfo"]);
                 args.push(format!("--downloadid={download_id}"));
@@ -603,6 +621,11 @@ mod tests {
         assert_eq!(JottaCommand::SyncStop.argv(), vec!["sync", "stop"]);
         assert_eq!(JottaCommand::SyncTrigger.argv(), vec!["sync", "trigger"]);
         assert_eq!(JottaCommand::SyncLog(20).argv(), vec!["sync", "log", "-n", "20"]);
+        assert_eq!(JottaCommand::StatusText.argv(), vec!["status"]);
+        assert_eq!(JottaCommand::SyncHelp.argv(), vec!["sync", "--help"]);
+        assert_eq!(JottaCommand::SyncLogWatch.argv(), vec!["sync", "log", "--watch"]);
+        assert!(!JottaCommand::StatusText.is_json());
+        assert!(!JottaCommand::SyncLogWatch.is_json());
         // Backup ignores: "ignores list" (NOT bare "ignores") — verified against
         // docs.jottacloud.com "Ignoring files and folders from backup".
         assert_eq!(
