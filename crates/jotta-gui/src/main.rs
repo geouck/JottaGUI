@@ -229,7 +229,8 @@ struct LiveTransfer {
 }
 
 /// Ét sample fra én kilde. `source`: 3 = sync log --watch (filnavne),
-/// 2 = observe, 1 = status (json + tekst), 0 = list uploads/downloads.
+/// 2 = observe (--json, ellers TUI via script(1)), 1 = status (json + tekst +
+/// WorkingProgress), 0 = list uploads/downloads.
 #[derive(Clone)]
 struct LiveFeed {
     source: u8,
@@ -349,20 +350,34 @@ fn run_observe_worker(
     live_tx: std::sync::mpsc::Sender<LiveFeed>,
     child_slot: Arc<Mutex<Option<std::process::Child>>>,
 ) {
-    use std::io::BufRead as _; // read_line på BufReader
     let Some(loc) = BinaryLocator::from_path() else {
         return;
     };
     let client = CliClient::new(loc);
-    // Detectér --json én gang (ikke alle jotta-cli-versioner har flaget).
+    // Detektér --json én gang (ikke alle jotta-cli-versioner har flaget).
     let supported = client
         .run_text(&JottaCommand::ObserveHelp)
         .map(|h| jotta_core::observe::observe_help_supports_json(&h))
         .unwrap_or(false);
-    if !supported {
-        return; // kilde 1 (status) og 0 (list) dækker det så godt de kan
+    if supported {
+        run_observe_json_worker(shutdown, live_tx, child_slot, client);
+    } else if CliClient::observe_tui_available() {
+        // jotta-cli 0.17.x: `observe` uden --json viser en TUI der kræver en
+        // TTY — kør den under script(1) og parse skærmen (filnavne + totals
+        // + live hastighed `@ 50.31MiB/s`, verificeret fra rigtig capture).
+        run_observe_tui_worker(shutdown, live_tx, child_slot, client);
     }
+    // Ellers: kilde 1 (status) og 0 (list) dækker det så godt de kan.
+}
 
+/// Kilde 2, JSON-mode: stream `observe --json` linje for linje.
+fn run_observe_json_worker(
+    shutdown: Arc<AtomicBool>,
+    live_tx: std::sync::mpsc::Sender<LiveFeed>,
+    child_slot: Arc<Mutex<Option<std::process::Child>>>,
+    client: CliClient,
+) {
+    use std::io::BufRead as _; // read_line på BufReader
     struct PathState {
         last_seen: std::time::Instant,
         bytes_done: Option<u64>,
@@ -492,6 +507,197 @@ fn run_observe_worker(
             }
         }
         paths.clear();
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    // Shutdown: dræb child hvis den stadig ligger i slotten.
+    let mut slot = child_slot.lock().unwrap();
+    if let Some(mut c) = slot.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+/// Kilde 2, TUI-mode: kør `jotta-cli observe` under `script(1)` (pseudo-TTY,
+/// fordi observe-TUI'en ellers afviser uden TTY) og læs stdout i rå chunks.
+/// Skærmen vedligeholdes af `jotta_core::observe::TuiScreen` (mini terminal-
+/// emulator), så cursor-baserede del-opdateringer også parses korrekt.
+/// Ud af skærmen læses: fil-rækker (`Checksuming <sti>` / `Uploading <sti>` /
+/// `Downloading <sti>`) og totals-rækken (`Observing upload-totals :: A / B
+/// files complete :: X / Y @ Z/s`) der bærer den ÆGTE live hastighed.
+/// Sender LiveFeed (kilde 2) ca. 1 gang/s; child genstartes ved EOF, dræbes
+/// ved shutdown. Read-only.
+fn run_observe_tui_worker(
+    shutdown: Arc<AtomicBool>,
+    live_tx: std::sync::mpsc::Sender<LiveFeed>,
+    child_slot: Arc<Mutex<Option<std::process::Child>>>,
+    client: CliClient,
+) {
+    use std::io::Read as _;
+    use jotta_core::observe::{ObserveTuiEvent, TuiScreen};
+
+    #[derive(Clone, Default)]
+    struct TotalsState {
+        seen: Option<std::time::Instant>,
+        done_bytes: Option<u64>,
+        total_bytes: Option<u64>,
+        rate: u64,
+    }
+
+    // path -> (upload, sidst set)
+    let mut recent: std::collections::HashMap<String, (bool, std::time::Instant)> =
+        std::collections::HashMap::new();
+    let mut up_totals = TotalsState::default();
+    let mut down_totals = TotalsState::default();
+    let mut last_send = std::time::Instant::now() - Duration::from_secs(2);
+
+    'respawn: loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let mut child = match client.spawn_observe_tui() {
+            Ok(c) => c,
+            Err(_) => {
+                std::thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+        let stdout = child.stdout.take();
+        {
+            let mut slot = child_slot.lock().unwrap();
+            if let Some(mut old) = slot.take() {
+                let _ = old.kill();
+                let _ = old.wait();
+            }
+            *slot = Some(child);
+        }
+        let Some(mut stdout) = stdout else {
+            continue 'respawn;
+        };
+        let mut screen = TuiScreen::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break 'respawn;
+            }
+            match stdout.read(&mut buf) {
+                Ok(0) => break, // EOF — child døde; genstart nedenfor
+                Ok(n) => {
+                    screen.feed(&buf[..n]);
+                    for ev in screen.parse_events() {
+                        let now = std::time::Instant::now();
+                        match ev {
+                            ObserveTuiEvent::File { upload, path } => {
+                                if !path.is_empty() {
+                                    recent.insert(path, (upload, now));
+                                }
+                            }
+                            ObserveTuiEvent::Totals {
+                                upload,
+                                done_bytes,
+                                total_bytes,
+                                rate_bps,
+                                ..
+                            } => {
+                                let t = if upload {
+                                    &mut up_totals
+                                } else {
+                                    &mut down_totals
+                                };
+                                t.seen = Some(now);
+                                if done_bytes.is_some() {
+                                    t.done_bytes = done_bytes;
+                                }
+                                if total_bytes.is_some() {
+                                    t.total_bytes = total_bytes;
+                                }
+                                if let Some(r) = rate_bps {
+                                    t.rate = r;
+                                }
+                            }
+                        }
+                    }
+                    // Send højst 1 gang/s; fjern udløbne stier/totals (> 10 s).
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_send) >= Duration::from_secs(1) {
+                        last_send = now;
+                        recent.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 10);
+                        // Delvise rækker: mens TUI'en skriver en fil-række ser vi
+                        // præfikser af den fulde sti — behold kun den længste.
+                        {
+                            let mut keys: Vec<&String> = recent.keys().collect();
+                            keys.sort_by_key(|k| k.len());
+                            let mut drop: Vec<String> = Vec::new();
+                            for (i, k) in keys.iter().enumerate() {
+                                if keys[i + 1..].iter().any(|k2| k2.starts_with(k.as_str())) {
+                                    drop.push((*k).clone());
+                                }
+                            }
+                            for k in drop {
+                                recent.remove(&k);
+                            }
+                        }
+                        for t in [&mut up_totals, &mut down_totals] {
+                            if t.seen.map(|x| now.duration_since(x).as_secs() >= 10).unwrap_or(true) {
+                                *t = TotalsState::default();
+                            }
+                        }
+                        let mut uploads = Vec::new();
+                        let mut downloads = Vec::new();
+                        for (path, (up, _)) in &recent {
+                            let lt = LiveTransfer {
+                                path: path.clone(),
+                                bytes_done: None,
+                                total: None,
+                            };
+                            if *up {
+                                uploads.push(lt);
+                            } else {
+                                downloads.push(lt);
+                            }
+                        }
+                        // Aggregerede totals-rækker EFTER fil-rækkerne, så
+                        // "aktuel fil" stadig vælger den første rigtige fil.
+                        if let (Some(d), Some(tot)) = (up_totals.done_bytes, up_totals.total_bytes) {
+                            if tot > 0 {
+                                uploads.push(LiveTransfer {
+                                    path: "Uploads".to_string(),
+                                    bytes_done: Some(d),
+                                    total: Some(tot),
+                                });
+                            }
+                        }
+                        if let (Some(d), Some(tot)) = (down_totals.done_bytes, down_totals.total_bytes) {
+                            if tot > 0 {
+                                downloads.push(LiveTransfer {
+                                    path: "Downloads".to_string(),
+                                    bytes_done: Some(d),
+                                    total: Some(tot),
+                                });
+                            }
+                        }
+                        let _ = live_tx.send(LiveFeed {
+                            source: 2,
+                            uploads,
+                            downloads,
+                            up_rate: up_totals.rate,
+                            down_rate: down_totals.rate,
+                        });
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // EOF/fejl: dræb child, ryd slot, vent, genstart.
+        {
+            let mut slot = child_slot.lock().unwrap();
+            if let Some(mut c) = slot.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        recent.clear();
+        up_totals = TotalsState::default();
+        down_totals = TotalsState::default();
         std::thread::sleep(Duration::from_secs(5));
     }
     // Shutdown: dræb child hvis den stadig ligger i slotten.
@@ -1651,7 +1857,7 @@ Vil du erstatte den?",
     // Fejlbeskeder udledes därfor fra hver entry's "Errors"-objekt via
     // jotta_core::remote::collect_transfer_errors().
     // --- Live overførsels-feed: én kanal, fire kilder (se LiveFeed ovenfor) ---
-    // source 3 = sync log --watch stream, 2 = observe --json, 1 = status, 0 = list.
+    // source 3 = sync log --watch, 2 = observe (json/TUI), 1 = status, 0 = list.
     let (live_tx, live_rx) = std::sync::mpsc::channel::<LiveFeed>();
     // Child-handles til evt. kørende streams — dræbes ved luk.
     let observe_child: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
@@ -2003,8 +2209,19 @@ Vil du erstatte den?",
                     .unwrap_or_default();
                 let text_up = jotta_core::textstatus::done_bytes_for(&text_prog, "upload");
                 let text_down = jotta_core::textstatus::done_bytes_for(&text_prog, "download");
-                let up_done = status.active_upload_bytes_done().max(text_up);
-                let down_done = status.active_download_bytes_done().max(text_down);
+                // Sync.WorkingProgress (verificeret mid-sync: CompletedUpload/
+                // TotalUpload {Files,Bytes}) er den ENESTE byte-tæller i JSON
+                // for sync-triggerede overførsler mens State.Uploading står {}.
+                let wp_up = status.sync_upload_bytes_done().unwrap_or(0);
+                let wp_down = status.sync_download_bytes_done().unwrap_or(0);
+                let up_done = status
+                    .active_upload_bytes_done()
+                    .max(text_up)
+                    .max(wp_up);
+                let down_done = status
+                    .active_download_bytes_done()
+                    .max(text_down)
+                    .max(wp_down);
                 let now = std::time::Instant::now();
                 let (up_rate, down_rate) = match last_live {
                     Some((t, pu, pd)) => {
@@ -2043,6 +2260,20 @@ Vil du erstatte den?",
                         })
                         .collect();
                 }
+                if up_list.is_empty() {
+                    // Sidste fallback: Sync.WorkingProgress-aggregat (ingen filnavne).
+                    if let (Some(d), Some(tot)) =
+                        (status.sync_upload_bytes_done(), status.sync_upload_total_bytes())
+                    {
+                        if tot > 0 {
+                            up_list.push(LiveTransfer {
+                                path: "Uploads".to_string(),
+                                bytes_done: Some(d),
+                                total: Some(tot),
+                            });
+                        }
+                    }
+                }
                 let mut down_list: Vec<LiveTransfer> = status
                     .active_downloads
                     .iter()
@@ -2063,6 +2294,19 @@ Vil du erstatte den?",
                         })
                         .collect();
                 }
+                if down_list.is_empty() {
+                    if let (Some(d), Some(tot)) =
+                        (status.sync_download_bytes_done(), status.sync_download_total_bytes())
+                    {
+                        if tot > 0 {
+                            down_list.push(LiveTransfer {
+                                path: "Downloads".to_string(),
+                                bytes_done: Some(d),
+                                total: Some(tot),
+                            });
+                        }
+                    }
+                }
                 let feed = LiveFeed {
                     source: 1,
                     uploads: up_list,
@@ -2074,7 +2318,10 @@ Vil du erstatte den?",
             }
             // Adaptivt interval (ressourcer): 3s mens aktiv (sync/restore),
             // ellers 10s når idle — ét status-kald pr. interval.
-            let active = matches!(status.state, State::Syncing) || status.restore_working;
+            let active = matches!(status.state, State::Syncing)
+                || status.restore_working
+                || status.sync_working
+                || status.sync_has_progress();
             {
                 let mut guard = poll_status.lock().unwrap();
                 *guard = status.clone();

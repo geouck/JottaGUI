@@ -42,6 +42,15 @@ pub struct Status {
     /// Whether a restore/download is currently in progress
     /// (from `State.RestoreWorking`).
     pub restore_working: bool,
+    /// Whether the sync folder is actively working right now
+    /// (from `State.SyncWorking`). Verified real: true mid-sync even while
+    /// `State.Uploading` stays `{}`.
+    pub sync_working: bool,
+    /// Byte counters of the running sync, from `Sync.WorkingProgress`
+    /// (verified real mid-sync schema, see `SyncProgress`). `None` when idle
+    /// or when the daemon reports `{}`. This is the ONLY reliable byte
+    /// counter source for sync-triggered transfers in `status --json`.
+    pub sync_progress: Option<SyncProgress>,
     /// Subscription/product name (from `User.AccountInfo.SubscriptionNameLocalized`
     /// or `User.AccountInfo.ProductNameLocalized`).
     pub subscription: Option<String>,
@@ -66,6 +75,67 @@ pub struct SyncInfo {
     pub root_path: Option<String>,
     pub files: Option<u64>,
     pub bytes: Option<u64>,
+}
+
+/// Sync byte counters from `Sync.WorkingProgress` in `status --json`.
+///
+/// Verified against real jotta-cli 0.17.x output captured mid-sync
+/// (Fedora, 2026-11-10):
+/// ```json
+/// "Sync": { ..., "WorkingProgress": {
+///     "CompletedUpload": {"Files": 2, "Bytes": 381598928},
+///     "TotalUpload":     {"Files": 3, "Bytes": 572398392}
+/// }, "SyncState": 2 }
+/// ```
+/// Early in a sync `CompletedUpload` is `{}` (empty object = zero done),
+/// and when idle the whole `WorkingProgress` is `{}`. Download pair
+/// (`CompletedDownload` / `TotalDownload`) is parsed the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncProgress {
+    pub upload_done_bytes: Option<u64>,
+    pub upload_total_bytes: Option<u64>,
+    pub download_done_bytes: Option<u64>,
+    pub download_total_bytes: Option<u64>,
+}
+
+/// Extract `{Files, Bytes}` (or `{}`) from a WorkingProgress entry.
+/// Empty object = present but zero => Some(0).
+fn parse_wp_entry(v: Option<&Value>) -> Option<u64> {
+    let v = v?;
+    match v {
+        Value::Object(map) => {
+            if map.is_empty() {
+                Some(0)
+            } else {
+                v.as_u64_ci("Bytes").or_else(|| {
+                    v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)
+                })
+            }
+        }
+        _ => v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64),
+    }
+}
+
+/// Parse `Sync.WorkingProgress` into byte counters. Returns None when the
+/// whole object is missing or `{}` (idle).
+fn parse_sync_progress(v: Option<&Value>) -> Option<SyncProgress> {
+    let wp = v?;
+    let Value::Object(map) = wp else { return None };
+    if map.is_empty() {
+        return None;
+    }
+    let p = SyncProgress {
+        upload_done_bytes: parse_wp_entry(wp.get_ci("CompletedUpload")),
+        upload_total_bytes: parse_wp_entry(wp.get_ci("TotalUpload")),
+        download_done_bytes: parse_wp_entry(wp.get_ci("CompletedDownload")),
+        download_total_bytes: parse_wp_entry(wp.get_ci("TotalDownload")),
+    };
+    // All four absent means we saw some other keys only -> treat as idle.
+    if p == SyncProgress::default() {
+        None
+    } else {
+        Some(p)
+    }
 }
 
 /// One in-flight transfer as reported inside `State.Uploading` / `State.Downloading`
@@ -299,6 +369,8 @@ impl Status {
                 files: sync_v.path(&["Count", "Files"]).and_then(as_u64),
                 bytes: sync_v.path(&["Count", "Bytes"]).and_then(as_u64),
             });
+            // Sync.WorkingProgress byte counters (verified real mid-sync, see SyncProgress).
+            s.sync_progress = parse_sync_progress(sync_v.get_ci("WorkingProgress"));
         }
 
         // Device name (verified schema: User.device.Name) — used for remote paths.
@@ -312,6 +384,13 @@ impl Status {
         // RestoreWorking (verified schema: State.RestoreWorking is a bool).
         s.restore_working = v
             .path(&["State", "RestoreWorking"])
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+
+        // SyncWorking (verified schema: State.SyncWorking is a bool; true mid-sync).
+        s.sync_working = state_ci
+            .and_then(|st| st.get_ci("SyncWorking").or_else(|| st.path(&["SyncWorking"])))
+            .or_else(|| v.get_ci("SyncWorking"))
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
 
@@ -371,6 +450,32 @@ impl Status {
     pub fn active_transfers_have_byte_counters(&self) -> bool {
         self.active_uploads.iter().any(|t| t.bytes_done.is_some())
             || self.active_downloads.iter().any(|t| t.bytes_done.is_some())
+    }
+
+    /// Bytes already uploaded by the running sync (from Sync.WorkingProgress),
+    /// if reported. This is the reliable byte counter for sync transfers.
+    pub fn sync_upload_bytes_done(&self) -> Option<u64> {
+        self.sync_progress.as_ref().and_then(|p| p.upload_done_bytes)
+    }
+
+    /// Bytes already downloaded by the running sync, if reported.
+    pub fn sync_download_bytes_done(&self) -> Option<u64> {
+        self.sync_progress.as_ref().and_then(|p| p.download_done_bytes)
+    }
+
+    /// Total bytes of the running sync upload, if reported.
+    pub fn sync_upload_total_bytes(&self) -> Option<u64> {
+        self.sync_progress.as_ref().and_then(|p| p.upload_total_bytes)
+    }
+
+    /// Total bytes of the running sync download, if reported.
+    pub fn sync_download_total_bytes(&self) -> Option<u64> {
+        self.sync_progress.as_ref().and_then(|p| p.download_total_bytes)
+    }
+
+    /// True when the sync reports any working progress (mid-sync byte counters).
+    pub fn sync_has_progress(&self) -> bool {
+        self.sync_progress.is_some()
     }
 
     /// Build a Status from a failed `status --json` run.
@@ -712,6 +817,98 @@ mod tests {
         assert_eq!(c.total_bytes, Some(900));
         assert!(s.active_transfers_have_byte_counters());
         assert_eq!(s.active_upload_bytes_done(), 3500);
+    }
+
+    #[test]
+    fn parses_working_progress_from_real_mid_sync_sample() {
+        // Real jotta-cli status --json captured mid-sync (Fedora, 2026-11-10,
+        // owner's terminal): early sample with CompletedUpload still {}.
+        let v = json::parse(
+            r#"{
+                "Sync": {
+                    "Enabled": true, "Automatic": true,
+                    "RootPath": "/home/eske/Documents",
+                    "WorkingProgress": {
+                        "CompletedUpload": {},
+                        "TotalUpload": {"Files": 3, "Bytes": 572398392}
+                    },
+                    "SyncState": 2
+                },
+                "State": {"SyncWorking": true, "Uploading": {}, "Downloading": {}}
+            }"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert!(s.sync_working);
+        let p = s.sync_progress.as_ref().expect("WorkingProgress present");
+        assert_eq!(p.upload_done_bytes, Some(0)); // {} means zero done
+        assert_eq!(p.upload_total_bytes, Some(572_398_392));
+        assert_eq!(p.download_done_bytes, None);
+        assert_eq!(s.sync_upload_bytes_done(), Some(0));
+        assert_eq!(s.sync_upload_total_bytes(), Some(572_398_392));
+        assert!(s.sync_has_progress());
+        // State.Uploading stays {} even mid-sync -> no active transfers from it.
+        assert!(!s.has_active_transfers());
+    }
+
+    #[test]
+    fn parses_working_progress_with_completed_upload_bytes() {
+        // Later sample from the same sync run: 2 of 3 files done.
+        let v = json::parse(
+            r#"{
+                "Sync": {
+                    "WorkingProgress": {
+                        "CompletedUpload": {"Files": 2, "Bytes": 381598928},
+                        "TotalUpload": {"Files": 3, "Bytes": 572398392}
+                    },
+                    "SyncState": 2
+                },
+                "State": {"SyncWorking": true, "Uploading": {}, "Downloading": {}}
+            }"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        let p = s.sync_progress.as_ref().unwrap();
+        assert_eq!(p.upload_done_bytes, Some(381_598_928));
+        assert_eq!(p.upload_total_bytes, Some(572_398_392));
+        assert_eq!(s.sync_upload_bytes_done(), Some(381_598_928));
+    }
+
+    #[test]
+    fn working_progress_empty_means_idle() {
+        // Idle: "WorkingProgress": {} (as seen in owner's first mid-scan sample)
+        // or key absent entirely.
+        let v = json::parse(r#"{"Sync": {"Enabled": true, "WorkingProgress": {}}}"#).unwrap();
+        let s = Status::from_json(&v);
+        assert!(s.sync_progress.is_none());
+        assert!(!s.sync_has_progress());
+        assert_eq!(s.sync_upload_bytes_done(), None);
+
+        let v = json::parse(r#"{"Sync": {"Enabled": true}}"#).unwrap();
+        let s = Status::from_json(&v);
+        assert!(s.sync_progress.is_none());
+        assert!(!s.sync_working);
+    }
+
+    #[test]
+    fn parses_working_progress_download_pair() {
+        let v = json::parse(
+            r#"{"Sync": {"WorkingProgress": {
+                "CompletedUpload": {"Files": 0, "Bytes": 0},
+                "TotalUpload": {"Files": 1, "Bytes": 100},
+                "CompletedDownload": {"Files": 1, "Bytes": 40},
+                "TotalDownload": {"Files": 2, "Bytes": 200}
+            }}}"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        let p = s.sync_progress.as_ref().unwrap();
+        assert_eq!(p.upload_done_bytes, Some(0));
+        assert_eq!(p.upload_total_bytes, Some(100));
+        assert_eq!(p.download_done_bytes, Some(40));
+        assert_eq!(p.download_total_bytes, Some(200));
+        assert_eq!(s.sync_download_bytes_done(), Some(40));
+        assert_eq!(s.sync_download_total_bytes(), Some(200));
     }
 
     #[test]

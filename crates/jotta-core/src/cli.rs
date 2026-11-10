@@ -554,6 +554,58 @@ impl CliClient {
             .spawn()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
     }
+
+    /// True when `script(1)` (util-linux) is available — needed to give
+    /// `jotta-cli observe` the pseudo-TTY it requires for its TUI, whose
+    /// screen we then parse with `observe::TuiScreen` (jotta-cli 0.17.x has
+    /// NO `observe --json`; verified: `unknown flag: --json`).
+    pub fn observe_tui_available() -> bool {
+        find_binary("script", "SCRIPT_BIN").is_some()
+    }
+
+    /// Spawn `jotta-cli observe` (both directions) under `script(1)` so it gets
+    /// a pseudo-TTY and renders its live TUI to stdout, which the caller reads
+    /// in raw chunks and feeds into `observe::TuiScreen`. Read-only; the
+    /// caller MUST kill the child on shutdown and `wait()` to reap.
+    ///
+    /// Inside a Flatpak the whole `script` invocation runs on the host via
+    /// `flatpak-spawn --host` (same mechanism as `run()`), and the inner
+    /// `jotta-cli observe` uses the host-view path of our cli binary.
+    pub fn spawn_observe_tui(&self) -> Result<Child> {
+        let script = find_binary("script", "SCRIPT_BIN").ok_or_else(|| {
+            Error::Spawn(
+                "script".into(),
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "script(1) not found — install util-linux-script",
+                ),
+            )
+        })?;
+        let cli_host = host_view(&self.locator.cli);
+        // Single-quote the path for the inner `sh -c` that script runs.
+        let inner = format!(
+            "'{}' observe",
+            cli_host.display().to_string().replace('\'', "'\\''")
+        );
+        let prefix = host_spawn_prefix(&script);
+        let mut command = if prefix.is_empty() {
+            Command::new(&script)
+        } else {
+            let mut c = Command::new(&prefix[0]);
+            c.args(&prefix[1..]);
+            c
+        };
+        command
+            .args(["-q", "-e", "-c"])
+            .arg(&inner)
+            .arg("/dev/null")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command
+            .spawn()
+            .map_err(|io| Error::Spawn(script.display().to_string(), io))
+    }
 }
 
 fn cmd_debug(cmd: &JottaCommand) -> &'static str {

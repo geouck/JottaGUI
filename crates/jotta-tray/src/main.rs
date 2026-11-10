@@ -507,6 +507,14 @@ fn main() {
             up_done = up_done.max(jotta_core::textstatus::done_bytes_for(&prog, "upload"));
             down_done = down_done.max(jotta_core::textstatus::done_bytes_for(&prog, "download"));
         }
+        // Sync.WorkingProgress (verificeret mid-sync i status --json:
+        // CompletedUpload/TotalUpload {Files,Bytes}) — den eneste byte-tæller i
+        // JSON for sync-overførsler mens State.Uploading står {}.
+        {
+            let st = poll_state.lock().unwrap();
+            up_done = up_done.max(st.status.sync_upload_bytes_done().unwrap_or(0));
+            down_done = down_done.max(st.status.sync_download_bytes_done().unwrap_or(0));
+        }
         {
             let now = std::time::Instant::now();
             let (up_rate, down_rate) = match last {
