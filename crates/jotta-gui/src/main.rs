@@ -193,14 +193,51 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     // Channel from worker threads -> main loop for toast messages.
     // Only String crosses the thread boundary; the toast is created on the main thread.
+    // SEMANTIK (owner-requested): én aktuel toast — en ny besked ERSTATTER teksten
+    // i den synlige toast med det samme (ingen kø), og toasten dismisses 4 s efter
+    // den seneste besked (timer nulstilles pr. besked).
     let (toast_tx, toast_rx) = std::sync::mpsc::channel::<String>();
     {
+        struct ToastState {
+            current: Option<adw::Toast>,
+            timer: Option<glib::SourceId>,
+        }
+        let state = std::rc::Rc::new(std::cell::RefCell::new(ToastState {
+            current: None,
+            timer: None,
+        }));
         let toast_overlay = toast_overlay.clone();
         let toast_rx = std::sync::Mutex::new(toast_rx);
         glib::idle_add_local(move || {
             let rx = toast_rx.lock().unwrap();
             while let Ok(msg) = rx.try_recv() {
-                toast_overlay.add_toast(adw::Toast::new(&msg));
+                let state2 = state.clone();
+                let toast_overlay2 = toast_overlay.clone();
+                let mut st = state2.borrow_mut();
+                if let Some(t) = st.current.clone() {
+                    t.set_title(&msg); // nyeste besked vinder med det samme
+                } else {
+                    let t = adw::Toast::new(&msg);
+                    let state3 = state2.clone();
+                    t.connect_dismissed(move |_| {
+                        state3.borrow_mut().current = None;
+                    });
+                    toast_overlay2.add_toast(t.clone());
+                    st.current = Some(t);
+                }
+                if let Some(id) = st.timer.take() {
+                    id.remove();
+                }
+                let state4 = state2.clone();
+                let id = glib::timeout_add_local(Duration::from_secs(4), move || {
+                    let mut st = state4.borrow_mut();
+                    if let Some(t) = st.current.take() {
+                        t.dismiss();
+                    }
+                    st.timer = None;
+                    glib::ControlFlow::Break
+                });
+                st.timer = Some(id);
             }
             glib::ControlFlow::Continue
         });
