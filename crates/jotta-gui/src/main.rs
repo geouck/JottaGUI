@@ -2297,7 +2297,7 @@ fn respawn_tray() -> String {
     }
     match candidates.into_iter().find(|p| p.is_file()) {
         Some(bin) => match std::process::Command::new(&bin).spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
                 // Reaper: ellers bliver den nye tray til zombie når den exit'er,
                 // og /proc/<pid> lever videre -> næste start fejler igen.
                 std::thread::spawn(move || {
