@@ -12,6 +12,7 @@ use gtk::gdk;
 use gtk::glib::{self, clone, Propagation};
 use gtk::prelude::*;
 use jotta_core::cli::{BinaryLocator, CliClient, JottaCommand};
+use jotta_core::remote::{DownloadStatus, UploadStatus};
 use jotta_core::status::{State, Status};
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -73,6 +74,47 @@ impl Clone for App {
 }
 
 fn main() {
+    // --- CLI-flag efter kutyme: -v/--verbose (kan gentages), --debug, -q/--quiet.
+    // Fallback: JOTTA_DESKTOP_VERBOSE=1|debug|trace. Resten af argv videresendes
+    // til GTK/GApplication. Log går til stderr: `jotta-desktop --debug 2>jotta.log`.
+    let mut level: u8 = std::env::var("JOTTA_DESKTOP_VERBOSE")
+        .ok()
+        .and_then(|v| jotta_core::parse_verbose(&v))
+        .unwrap_or(0);
+    let mut passthrough: Vec<String> = vec![std::env::args()
+        .next()
+        .unwrap_or_else(|| "jotta-desktop".to_string())];
+    for a in std::env::args().skip(1) {
+        if let Some(v) = a.strip_prefix("--verbose=") {
+            if let Some(l) = jotta_core::parse_verbose(v) {
+                level = l;
+            }
+        } else if let Some(rest) = a.strip_prefix("-v").filter(|d| !d.is_empty()) {
+            if rest.chars().all(|c| c == 'v') {
+                // Bundlet: -vv, -vvv
+                level = (level + rest.len() as u8 + 1).min(3);
+            } else if rest.chars().all(|c| c.is_ascii_digit()) {
+                // -v2, -v3
+                level = level.max(rest.parse::<u8>().unwrap_or(1).min(3));
+            } else {
+                passthrough.push(a);
+            }
+        } else {
+            match a.as_str() {
+                "-v" | "--verbose" => level = (level + 1).min(3),
+                "--debug" => level = level.max(3),
+                "-q" | "--quiet" => level = 0,
+                "-h" | "--help" => {
+                    print_usage(&passthrough[0]);
+                    std::process::exit(0);
+                }
+                _ => passthrough.push(a),
+            }
+        }
+    }
+    jotta_core::set_verbose(level);
+    jotta_core::vlog!(1, "jotta-desktop starter, verbose={} argv={:?}", level, passthrough);
+
     adw::init().expect("failed to init libadwaita");
 
     // CSS: kompakte window controls (minimer/maximer/luk) + headerbar.
@@ -137,8 +179,28 @@ fn main() {
         });
     }
 
-    let code: i32 = app.run().into();
+    let code: i32 = app.run_with_args(&passthrough).into();
     std::process::exit(code);
+}
+
+/// `jotta-desktop --help` — vores egne flag; resten går videre til GTK.
+fn print_usage(prog: &str) {
+    println!(
+        "{prog} — Jottacloud desktop-klient (GTK4/libadwaita)
+
+Usage: {prog} [OPTIONS]
+
+Options:
+  -v, --verbose       Øg log-niveau til stderr (kan gentages: -vv, -v3)
+      --verbose=N     Sæt niveau direkte (1..=3)
+      --debug         Niveau 3: alle jotta-cli-kald + live-feed kilder + status
+  -q, --quiet         Ingen log (standard)
+  -h, --help          Vis denne tekst
+
+Miljø: JOTTA_DESKTOP_VERBOSE=1|debug|trace sætter niveau hvis intet flag gives.
+Eksempel: {prog} --debug 2>jotta.log
+Øvrige argumenter videresendes til GTK/GApplication."
+    );
 }
 
 /// Spawn jotta-tray som detached child hvis den ikke allerede kører.
@@ -171,7 +233,7 @@ fn ensure_tray_running() {
                 if !bin_newer {
                     return;
                 }
-                eprintln!("jotta-gui: jotta-tray binær opdateret — genstarter tray (pid {pid})");
+                jotta_core::vlog!(1, "jotta-tray binær opdateret — genstarter tray (pid {pid})");
                 let _ = std::process::Command::new("kill")
                     .arg("-TERM")
                     .arg(pid.to_string())
@@ -190,8 +252,14 @@ fn ensure_tray_running() {
     }
 
     let bin = tray_bin.unwrap_or_else(|| std::path::PathBuf::from("jotta-tray"));
+    let vlevel = jotta_core::verbose();
     std::thread::spawn(move || {
-        match std::process::Command::new(&bin)
+        let mut cmd = std::process::Command::new(&bin);
+        if vlevel > 0 {
+            cmd.arg(format!("--verbose={vlevel}"));
+        }
+        jotta_core::vlog!(1, "spawn jotta-tray {:?} (verbose={vlevel})", bin);
+        match cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -213,7 +281,9 @@ fn ensure_tray_running() {
 // `observe` har intet --json på jotta-cli 0.17.x. Derfor FIRE kilder:
 //   source 3 = `sync log --watch` stream — NÆVNER filen der synces lige nu
 //              (ingen bytes; hastighed kommer fra de andre kilder)
-//   source 2 = `observe --json` stream (hvis understøttet — detekteret via --help)
+//   source 2 = `observe` stream: --json hvis understøttet (detekteret via --help),
+//              ellers TUI'en under script(1) parset med observe::TuiScreen
+//              (filnavne + totals + ÆGTE hastighed @ MiB/s)
 //   source 1 = `status --json` State.Uploading/Downloading + TEKST-status
 //              `> Uploads: n (bytes) / n (bytes)` linjer (byte-tællere → hastighed)
 //   source 0 = `list uploads/downloads --json` (Total-Remaining)
@@ -319,6 +389,7 @@ fn apply_live_feed(
         .iter()
         .find(|t| !t.path.is_empty())
         .or_else(|| feed.downloads.iter().find(|t| !t.path.is_empty()));
+    jotta_core::vlog!(2, "current transfer <- {:?}", cur.map(|t| t.path.as_str()));
     match cur {
         Some(t) => {
             let name = t.path.rsplit('/').next().unwrap_or(&t.path);
@@ -394,7 +465,10 @@ fn run_observe_json_worker(
             break;
         }
         let mut child = match client.spawn_stream(&JottaCommand::ObserveJson) {
-            Ok(c) => c,
+            Ok(c) => {
+                jotta_core::vlog!(1, "observe --json child spawned (pid {})", c.id());
+                c
+            }
             Err(_) => {
                 std::thread::sleep(Duration::from_secs(10));
                 continue;
@@ -420,7 +494,10 @@ fn run_observe_json_worker(
             }
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) => break, // EOF — child døde; genstart nedenfor
+                Ok(0) => {
+                    jotta_core::vlog!(1, "observe/stream EOF — child døde, genstarter");
+                    break;
+                }
                 Ok(_) => {
                     if let Some(ev) = jotta_core::observe::parse_observe_line(&line) {
                         let dir = match ev.direction {
@@ -555,7 +632,10 @@ fn run_observe_tui_worker(
             break;
         }
         let mut child = match client.spawn_observe_tui() {
-            Ok(c) => c,
+            Ok(c) => {
+                jotta_core::vlog!(1, "observe TUI (script) child spawned (pid {})", c.id());
+                c
+            }
             Err(_) => {
                 std::thread::sleep(Duration::from_secs(10));
                 continue;
@@ -580,7 +660,10 @@ fn run_observe_tui_worker(
                 break 'respawn;
             }
             match stdout.read(&mut buf) {
-                Ok(0) => break, // EOF — child døde; genstart nedenfor
+                Ok(0) => {
+                    jotta_core::vlog!(1, "observe/stream EOF — child døde, genstarter");
+                    break;
+                }
                 Ok(n) => {
                     screen.feed(&buf[..n]);
                     for ev in screen.parse_events() {
@@ -742,7 +825,10 @@ fn run_sync_log_worker(
             break;
         }
         let mut child = match client.spawn_stream(&JottaCommand::SyncLogWatch) {
-            Ok(c) => c,
+            Ok(c) => {
+                jotta_core::vlog!(1, "sync log --watch child spawned (pid {})", c.id());
+                c
+            }
             Err(_) => {
                 std::thread::sleep(Duration::from_secs(10));
                 continue;
@@ -768,7 +854,10 @@ fn run_sync_log_worker(
             }
             line.clear();
             match reader.read_line(&mut line) {
-                Ok(0) => break,
+                Ok(0) => {
+                    jotta_core::vlog!(1, "sync log --watch EOF — genstarter");
+                    break;
+                }
                 Ok(_) => {
                     if let Some(ev) = jotta_core::synclog::parse_sync_log_line(&line) {
                         use jotta_core::synclog::SyncLogAction;
@@ -1933,9 +2022,24 @@ Vil du erstatte den?",
                             .run_json(&JottaCommand::ListDownloads)
                             .map(|v| jotta_core::remote::parse_downloads_json(&v))
                             .unwrap_or_default();
-                        // Live hastighed = delta(overførte bytes) / delta(tid).
-                        let up_done = jotta_core::remote::total_bytes_done_uploads(&uploads);
-                        let down_done = jotta_core::remote::total_bytes_done_downloads(&downloads);
+                        // Kun IGANGVÆRENDE overførsler tæller til live-feed og
+                        // hastighed: `list uploads/downloads` viser også completed/
+                        // failed, og en completed download kan stadig have
+                        // Local = ".jottaclouddownload" (temp-fil før rename) —
+                        // den må ikke blive vist som "aktuel overførsel" ved idle.
+                        let ongoing_uploads: Vec<&jotta_core::remote::UploadEntry> = uploads
+                            .iter()
+                            .filter(|e| e.status == UploadStatus::Ongoing)
+                            .collect();
+                        let ongoing_downloads: Vec<&jotta_core::remote::DownloadEntry> = downloads
+                            .iter()
+                            .filter(|e| e.status == DownloadStatus::Ongoing)
+                            .collect();
+                        // Live hastighed = delta(overførte bytes) / delta(tid),
+                        // kun over igangværende overførsler.
+                        let up_done: u64 = ongoing_uploads.iter().map(|e| e.bytes_done().unwrap_or(0)).sum();
+                        let down_done: u64 =
+                            ongoing_downloads.iter().map(|e| e.bytes_done().unwrap_or(0)).sum();
                         let now = std::time::Instant::now();
                         let (up_rate, down_rate) = match last {
                             Some((prev_t, prev_up, prev_down)) => {
@@ -1952,13 +2056,18 @@ Vil du erstatte den?",
                             None => (0, 0),
                         };
                         last = Some((now, up_done, down_done));
-                        // Live-feed kilde 0 (list uploads/downloads) til hastighed + "I gang nu".
+                        // Live-feed kilde 0 (list uploads/downloads, kun ongoing)
+                        // til hastighed + "I gang nu".
                         let feed = LiveFeed {
                             source: 0,
-                            uploads: uploads
+                            uploads: ongoing_uploads
                                 .iter()
                                 .map(|e| LiveTransfer {
-                                    path: if e.local_path.is_empty() {
+                                    // jottad's temp-fil ".jottaclouddownload" er ikke
+                                    // et brugbart navn — vis remote stien i stedet.
+                                    path: if e.local_path.is_empty()
+                                        || e.local_path.rsplit('/').next() == Some(".jottaclouddownload")
+                                    {
                                         e.remote_path.clone()
                                     } else {
                                         e.local_path.clone()
@@ -1967,10 +2076,14 @@ Vil du erstatte den?",
                                     total: e.total_bytes,
                                 })
                                 .collect(),
-                            downloads: downloads
+                            downloads: ongoing_downloads
                                 .iter()
                                 .map(|e| LiveTransfer {
-                                    path: e.remote_path.clone(),
+                                    path: if e.remote_path.is_empty() {
+                                        e.local_dest.clone()
+                                    } else {
+                                        e.remote_path.clone()
+                                    },
                                     bytes_done: e.bytes_done(),
                                     total: e.total_bytes,
                                 })
@@ -2009,6 +2122,15 @@ Vil du erstatte den?",
                 let rx = live_rx.lock().unwrap();
                 let mut st = state.borrow_mut();
                 while let Ok(feed) = rx.try_recv() {
+                    jotta_core::vlog!(
+                        2,
+                        "live feed src={} up={}B/s down={}B/s up={:?} down={:?}",
+                        feed.source,
+                        feed.up_rate,
+                        feed.down_rate,
+                        feed.uploads.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(),
+                        feed.downloads.iter().map(|t| t.path.as_str()).collect::<Vec<_>>()
+                    );
                     let s = (feed.source as usize).min(3);
                     st.latest[s] = Some(feed);
                     st.seen[s] = Some(now);
@@ -2055,6 +2177,14 @@ Vil du erstatte den?",
                 }
             };
             if let Some(feed) = feed {
+                jotta_core::vlog!(
+                    1,
+                    "live merged: src={} up={}B/s down={}B/s transfers={}",
+                    feed.source,
+                    feed.up_rate,
+                    feed.down_rate,
+                    feed.uploads.len() + feed.downloads.len()
+                );
                 apply_live_feed(
                     &speed_label,
                     &current_row,
@@ -2307,6 +2437,24 @@ Vil du erstatte den?",
                         }
                     }
                 }
+                jotta_core::vlog!(
+                    2,
+                    "status feed src=1: state={:?} sync_working={} wp=({:?},{:?}) text=({},{}) json_up={} json_down={} up_done={} down_done={} rate={}/{} up_list={:?} down_list={:?}",
+                    status.state,
+                    status.sync_working,
+                    status.sync_upload_bytes_done(),
+                    status.sync_download_bytes_done(),
+                    text_up,
+                    text_down,
+                    status.active_uploads.len(),
+                    status.active_downloads.len(),
+                    up_done,
+                    down_done,
+                    up_rate,
+                    down_rate,
+                    up_list.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(),
+                    down_list.iter().map(|t| t.path.as_str()).collect::<Vec<_>>()
+                );
                 let feed = LiveFeed {
                     source: 1,
                     uploads: up_list,

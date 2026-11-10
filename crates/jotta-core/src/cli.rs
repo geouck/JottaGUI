@@ -463,11 +463,21 @@ impl CliClient {
             c.args(&prefix[1..]);
             c
         };
+        crate::vlog!(2, "run: {} {:?}", self.locator.cli.display(), argv);
         let out = command
             .args(&argv)
             .stdin(Stdio::null())
             .output()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))?;
+        crate::vlog!(
+            3,
+            "run: {} {:?} -> exit={} stdout={}B stderr={}B",
+            self.locator.cli.display(),
+            argv,
+            out.status.code().unwrap_or(-1),
+            out.stdout.len(),
+            out.stderr.len()
+        );
 
         if !out.status.success() {
             let code = out.status.code().unwrap_or(-1);
@@ -525,6 +535,7 @@ impl CliClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::vlog!(2, "spawn piped: {} {:?}", self.locator.cli.display(), argv);
         command
             .spawn()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
@@ -550,6 +561,7 @@ impl CliClient {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        crate::vlog!(2, "spawn stream: {} {:?}", self.locator.cli.display(), argv);
         command
             .spawn()
             .map_err(|io| Error::Spawn(self.locator.cli.display().to_string(), io))
@@ -602,6 +614,7 @@ impl CliClient {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        crate::vlog!(2, "spawn observe TUI: {} -qec {:?} /dev/null", script.display(), inner);
         command
             .spawn()
             .map_err(|io| Error::Spawn(script.display().to_string(), io))

@@ -350,6 +350,30 @@ fn pid_alive_and_is_tray(pid: u32) -> bool {
 }
 
 fn main() {
+    // Verbose-flag efter samme kutyme som jotta-desktop: -v/--verbose (gentagelig),
+    // --verbose=N, --debug, -q/--quiet, ellers JOTTA_DESKTOP_VERBOSE. GUI'en giver
+    // niveauet videre når den spawner tray'en.
+    let mut level: u8 = std::env::var("JOTTA_DESKTOP_VERBOSE")
+        .ok()
+        .and_then(|v| jotta_core::parse_verbose(&v))
+        .unwrap_or(0);
+    for a in std::env::args().skip(1) {
+        if let Some(v) = a.strip_prefix("--verbose=") {
+            if let Some(l) = jotta_core::parse_verbose(v) {
+                level = l;
+            }
+        } else {
+            match a.as_str() {
+                "-v" | "--verbose" => level = (level + 1).min(3),
+                "--debug" => level = level.max(3),
+                "-q" | "--quiet" => level = 0,
+                _ => {}
+            }
+        }
+    }
+    jotta_core::set_verbose(level);
+    jotta_core::vlog!(1, "jotta-tray starter, verbose={level}");
+
     // Single-instance: skriv PID-fil og afslut hvis en anden tray allerede kører.
     let pid_file = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -532,9 +556,27 @@ fn main() {
                 None => (0, 0),
             };
             last = Some((now, up_done, down_done));
+            jotta_core::vlog!(
+                1,
+                "tray poll: up_done={} down_done={} rate={}B/s/{}B/s",
+                up_done,
+                down_done,
+                up_rate,
+                down_rate
+            );
             let mut st = poll_state.lock().unwrap();
             st.up_rate = up_rate;
             st.down_rate = down_rate;
+            jotta_core::vlog!(
+                2,
+                "tray state: {:?} sync_working={} wp=({:?},{:?}) active_up={} active_down={}",
+                st.status.state,
+                st.status.sync_working,
+                st.status.sync_upload_bytes_done(),
+                st.status.sync_download_bytes_done(),
+                st.status.active_uploads.len(),
+                st.status.active_downloads.len()
+            );
         }
         poll_handle.update(|_tray| {});
         std::thread::sleep(Duration::from_secs(3));
