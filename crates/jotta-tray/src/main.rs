@@ -17,12 +17,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod i18n;
 mod pixmaps;
 
 #[derive(Debug)]
 struct AppState {
     status: Status,
     err: Option<String>,
+}
+
+/// Localized one-line status for menu + tooltip (mirrors Status::tooltip,
+/// but translated — jotta-core itself stays Danish/zero-dep).
+fn status_line(st: &Status) -> String {
+    match st.state {
+        State::Offline => i18n::t("tray.state.offline").to_string(),
+        State::NeedsLogin => i18n::t("tray.state.needslogin").to_string(),
+        State::Paused => i18n::t("tray.state.paused").to_string(),
+        State::Syncing => match st.active_transfers {
+            Some(n) => i18n::tf("tray.state.syncing.n", &[&n]),
+            None => i18n::t("tray.state.syncing").to_string(),
+        },
+        State::Idle => i18n::t("tray.state.idle").to_string(),
+    }
 }
 
 struct JottaTray {
@@ -95,8 +111,8 @@ impl Tray for JottaTray {
     fn tool_tip(&self) -> ToolTip {
         let s = self.state.lock().unwrap();
         let description = match &s.err {
-            Some(e) => format!("Fejl: {e}"),
-            None => s.status.tooltip(),
+            Some(e) => i18n::tf("tray.error", &[&e]),
+            None => status_line(&s.status),
         };
         ToolTip {
             icon_name: Self::icon_for(s.status.state).to_string(),
@@ -112,7 +128,7 @@ impl Tray for JottaTray {
         let close_gui_on_quit = Arc::clone(&self.close_gui_on_quit);
         vec![
             StandardItem {
-                label: format!("Status: {}", s.status.tooltip()),
+                label: i18n::tf("tray.status", &[&status_line(&s.status)]),
                 enabled: false,
                 ..Default::default()
             }
@@ -120,13 +136,13 @@ impl Tray for JottaTray {
             MenuItem::Separator,
             match s.status.paused {
                 Some(true) => StandardItem {
-                    label: "Genoptag".into(),
+                    label: i18n::t("tray.resume").into(),
                     activate: Box::new(|_tray| run_simple_idempotent(JottaCommand::Resume)),
                     ..Default::default()
                 }
                 .into(),
                 _ => StandardItem {
-                    label: "Pause".into(),
+                    label: i18n::t("tray.pause").into(),
                     activate: Box::new(|_tray| run_simple(JottaCommand::Pause)),
                     ..Default::default()
                 }
@@ -134,7 +150,7 @@ impl Tray for JottaTray {
             },
             MenuItem::Separator,
             StandardItem {
-                label: "Åbn vindue".into(),
+                label: i18n::t("tray.open_window").into(),
                 activate: Box::new(|_tray| {
                     spawn_gui();
                 }),
@@ -142,7 +158,7 @@ impl Tray for JottaTray {
             }
             .into(),
             StandardItem {
-                label: "Åbn jottacloud.com".into(),
+                label: i18n::t("tray.open_web").into(),
                 activate: Box::new(|_tray| {
                     let _ = open_url("https://www.jottacloud.com/web/");
                 }),
@@ -150,7 +166,7 @@ impl Tray for JottaTray {
             }
             .into(),
             StandardItem {
-                label: "Afslut".into(),
+                label: i18n::t("tray.quit").into(),
                 activate: Box::new(move |_tray| {
                     // Hvis minimize-to-tray er aktiv, luk også GUI.
                     if close_gui_on_quit.load(Ordering::SeqCst) {
