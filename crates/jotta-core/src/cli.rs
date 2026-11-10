@@ -611,7 +611,10 @@ impl CliClient {
             .args(["-q", "-e", "-c"])
             .arg(&inner)
             .arg("/dev/null")
-            .stdin(Stdio::null())
+            // stdin PIPED (ikke null): nogle util-linux script-versioner stopper
+            // når stdin når EOF — med et pipe holdes den åben så længe vi lever,
+            // så observe-TUI'en bliver ved med at streame til os.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         crate::vlog!(2, "spawn observe TUI: {} -qec {:?} /dev/null", script.display(), inner);
