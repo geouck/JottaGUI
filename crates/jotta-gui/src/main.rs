@@ -1838,7 +1838,7 @@ Vil du erstatte den?",
                     fresh
                         .iter()
                         .rev()
-                        .find(|&&s| st.latest[s].map(|f| has_transfers(f)).unwrap_or(false))
+                        .find(|&&s| st.latest[s].as_ref().map(|f| has_transfers(f)).unwrap_or(false))
                         .or_else(|| fresh.iter().rev().next())
                         .and_then(|&s| st.latest[s].clone())
                         .map(|mut f| {
