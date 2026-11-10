@@ -228,10 +228,18 @@ impl Status {
         );
 
         // Backup folders (verified schema: Backup.State.Enabled.Backups[]).
+        // Each backup entry ALSO carries its own "Uploading" object (verified in
+        // real status --json: "Uploading": {} inside Backups[]) — active BACKUP
+        // uploads show up there, while State.Uploading covers sync. Merge both.
         if let Some(arr) = v
             .path(&["Backup", "State", "Enabled", "Backups"])
             .and_then(|x| x.as_array())
         {
+            for b in arr {
+                if let Some(up) = b.get_ci("Uploading") {
+                    s.active_uploads.extend(parse_active_transfers(Some(up)));
+                }
+            }
             s.backups = arr
                 .iter()
                 .map(|b| BackupFolder {
@@ -631,6 +639,30 @@ mod tests {
         // Count still derived from the same objects.
         assert_eq!(s.active_transfers, Some(1));
         assert_eq!(s.state, State::Offline); // not logged in in this sample
+    }
+
+    #[test]
+    fn parses_per_backup_uploading_objects() {
+        // Real schema shape (captured from jotta-cli status --json, Fedora 2026):
+        // each Backups[] entry has its own "Uploading" object alongside State.Uploading.
+        let v = json::parse(
+            r#"{
+                "State": {"Uploading": {}, "Downloading": {}},
+                "Backup": {"State": {"Enabled": {"Backups": [
+                    {"Name": "Documents", "Path": "/home/eske/Documents",
+                     "Uploading": {"u-7": {"Path": "/home/eske/Documents/big.iso", "Bytes": 100, "Total": 5000}},
+                     "Errors": {}}
+                ]}}}
+            }"#,
+        )
+        .unwrap();
+        let s = Status::from_json(&v);
+        assert!(s.active_uploads.iter().any(|t| t.path.as_deref() == Some("/home/eske/Documents/big.iso")));
+        assert!(s.has_active_transfers());
+        assert_eq!(s.active_upload_bytes_done(), 100);
+        // Backup folder list still parsed as before.
+        assert_eq!(s.backups.len(), 1);
+        assert_eq!(s.backups[0].name, "Documents");
     }
 
     #[test]
