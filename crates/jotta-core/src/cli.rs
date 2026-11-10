@@ -149,6 +149,13 @@ pub enum JottaCommand {
     Resume,
     /// `config set <key> <value>` — sæt en config-værdi (fx syncpaused).
     ConfigSet { key: String, value: String },
+    /// `config` (uden argumenter) — printer ALLE config-værdier som
+    /// `key : value`-linjer (verificeret mod docs.jottacloud.com). Se
+    /// parse_config_lines(). Ikke-JSON.
+    ConfigList,
+    /// `logout` — resetter credentials og stopper backups. DESTRUKTIV:
+    /// UI skal altid bekræfte før denne kommando udstedes.
+    Logout,
     /// Add a folder to backup.
     BackupAdd(PathBuf),
     /// Remove a backup folder by name.
@@ -257,6 +264,8 @@ impl JottaCommand {
                 args.push(key.clone());
                 args.push(value.clone());
             }
+            JottaCommand::ConfigList => push(&mut args, &["config"]),
+            JottaCommand::Logout => push(&mut args, &["logout"]),
             JottaCommand::BackupAdd(p) => {
                 push(&mut args, &["add"]);
                 args.push(p.to_string_lossy().into_owned());
@@ -507,9 +516,42 @@ pub struct Output {
     pub stderr: String,
 }
 
+/// Parse `jotta-cli config` output (bare `config`, uden argumenter) som
+/// `key : value`-linjer — verificeret format fra docs.jottacloud.com, fx
+/// `scaninterval : 1h0m0s`, `uploadrate : unlimited`. Tolerant: linjer uden
+/// `:` springes over; værdien må gerne selv indeholde `:` (split ved første).
+pub fn parse_config_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let (k, v) = l.trim().split_once(':')?;
+            let k = k.trim();
+            if k.is_empty() {
+                None
+            } else {
+                Some((k.to_string(), v.trim().to_string()))
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_config_list_lines() {
+        let out = "downloadrate : unlimited\nuploadrate : 10m\nscaninterval : 1h0m0s\nsyncpaused : false\n";
+        let v = parse_config_lines(out);
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[2], ("scaninterval".to_string(), "1h0m0s".to_string()));
+        assert_eq!(v[1], ("uploadrate".to_string(), "10m".to_string()));
+        // value må gerne indeholde ':' (split ved første kolon)
+        assert_eq!(
+            parse_config_lines("timeformat : 15:04:05\n"),
+            vec![("timeformat".to_string(), "15:04:05".to_string())]
+        );
+        assert!(parse_config_lines("garbage uden kolon\n").is_empty());
+    }
 
     #[test]
     fn argv_shapes() {
@@ -620,6 +662,9 @@ mod tests {
             JottaCommand::ConfigSet { key: "syncpaused".into(), value: "true".into() }.argv(),
             vec!["config", "set", "syncpaused", "true"]
         );
+        // ConfigList: bare `config` (printer "key : value"-linjer); Logout: `logout`
+        assert_eq!(JottaCommand::ConfigList.argv(), vec!["config"]);
+        assert_eq!(JottaCommand::Logout.argv(), vec!["logout"]);
         // List uploads --json (iteration 7: transfers page).
         assert_eq!(
             JottaCommand::ListUploads.argv(),

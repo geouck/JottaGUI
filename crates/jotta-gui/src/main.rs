@@ -261,6 +261,42 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         });
     }
 
+    // "Log ud" (iteration 12): DESTRUKTIV — altid bekræft før `jotta-cli logout`.
+    // Synlig når logget ind; efter logout går status -> NeedsLogin, og
+    // "Log ind"-rækken dukker op igen (skift bruger = log ud + log ind igen).
+    let logout_row = adw::ActionRow::builder()
+        .title("Log ud")
+        .subtitle("Fjerner denne enheds login fra Jottacloud")
+        .build();
+    let logout_btn = gtk::Button::with_label("Log ud");
+    logout_btn.add_css_class("destructive-action");
+    logout_btn.set_valign(gtk::Align::Center);
+    logout_btn.set_visible(false);
+    logout_row.add_suffix(&logout_btn);
+    logout_row.set_activatable_widget(Some(&logout_btn));
+    {
+        let window = window.clone();
+        let toast_tx = toast_tx.clone();
+        logout_btn.connect_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(
+                Some("Log ud?"),
+                Some("Login fjernes fra denne enhed og backup/sync stopper. Filer i skyen påvirkes ikke. Du kan logge ind igen med et nyt token."),
+            );
+            dialog.add_response("cancel", "Annuller");
+            dialog.add_response("logout", "Log ud");
+            dialog.set_response_appearance("logout", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let toast_tx = toast_tx.clone();
+            dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
+                if resp == "logout" {
+                    run_cli(JottaCommand::Logout);
+                    let _ = toast_tx.send("Logger ud…".to_string());
+                }
+            });
+        });
+    }
+
     let status_page = build_status_page(
         &status_state_label,
         &status_email_label,
@@ -269,6 +305,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &pause_switch,
         &daemon_banner,
         &login_row,
+        &logout_row,
     );
     stack.add_titled(&status_page, Some("status"), "Status");
 
@@ -447,7 +484,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let info_page = build_info_page(&info_group);
     stack.add_titled(&info_page, Some("info"), "Info");
 
-    let settings_page = build_settings_page();
+    let settings_page = build_settings_page(toast_tx.clone());
     stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
 
     sidebar.connect_row_selected(clone!(
@@ -1162,6 +1199,7 @@ Vil du erstatte den?",
         toast_tx: toast_tx.clone(),
         daemon_banner: daemon_banner.clone(),
         login_row: login_row.clone(),
+        logout_row: logout_row.clone(),
     };
 
     // --- Info page: fetch Jottacloud version once on a worker thread ---
@@ -1240,14 +1278,18 @@ Vil du erstatte den?",
             }
             let status = match poll_client.status() {
                 Ok(v) => Status::from_json(&v),
-                Err(_) => Status::default(),
+                // PR #14-mapping også i tråd-polleren: "Not logged in" -> NeedsLogin
+                Err(e) => Status::from_cli_error(&e),
             };
+            // Adaptivt interval (ressourcer): 3s mens aktiv (sync/restore),
+            // ellers 10s når idle — ét status-kald pr. interval.
+            let active = matches!(status.state, State::Syncing) || status.restore_working;
             {
                 let mut guard = poll_status.lock().unwrap();
                 *guard = status.clone();
             }
             let _ = status_tx.send(status);
-            std::thread::sleep(Duration::from_secs(3));
+            std::thread::sleep(Duration::from_secs(if active { 3 } else { 10 }));
         });
     }
     {
@@ -1346,6 +1388,8 @@ struct StatusWidgets {
     daemon_banner: adw::Banner,
     /// Login-række vises kun ved State::NeedsLogin.
     login_row: adw::ActionRow,
+    /// Log ud-række vises kun når logget ind.
+    logout_row: adw::ActionRow,
 }
 
 impl Clone for StatusWidgets {
@@ -1369,6 +1413,7 @@ impl Clone for StatusWidgets {
             toast_tx: self.toast_tx.clone(),
             daemon_banner: self.daemon_banner.clone(),
             login_row: self.login_row.clone(),
+            logout_row: self.logout_row.clone(),
         }
     }
 }
@@ -1390,6 +1435,11 @@ impl StatusWidgets {
         // Login-række: kun ved NeedsLogin (polleren styrer synligheden).
         self.login_row
             .set_visible(matches!(status.state, State::NeedsLogin));
+        // Log ud-række: kun når logget ind (ikke NeedsLogin/Offline).
+        self.logout_row.set_visible(matches!(
+            status.state,
+            State::Idle | State::Syncing | State::Paused
+        ));
 
         // Daemon banner: vis når offline (jottad svarer ikke).
         // Én fejlmeddelelse — polleren viser ikke banner igen før næste offline.
@@ -1612,6 +1662,7 @@ fn build_status_page(
     pause_switch: &gtk::Switch,
     daemon_banner: &adw::Banner,
     login_row: &adw::ActionRow,
+    logout_row: &adw::ActionRow,
 ) -> gtk::Widget {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_, 24);
@@ -1639,6 +1690,7 @@ fn build_status_page(
     account_group.add(&state_row);
     account_group.add(&email_row);
     account_group.add(login_row);
+    account_group.add(logout_row);
     box_.append(&account_group);
 
     // Pause/resume: positiv formulering — ON = automatisk aktiv.
@@ -1875,8 +1927,9 @@ fn set_row_value(row: &adw::ActionRow, value: &str) {
     row.set_subtitle(value);
 }
 
-/// Byg Indstillinger-siden med minimize-to-tray switch.
-fn build_settings_page() -> gtk::Widget {
+/// Byg Indstillinger-siden: minimize-to-tray, start ved login, vis tray-ikon,
+/// avancerede jottad-indstillinger (uploadrate/downloadrate/scaninterval).
+fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget {
     let group = adw::PreferencesGroup::builder()
         .title("Generelt")
         .build();
@@ -1986,10 +2039,169 @@ fn build_settings_page() -> gtk::Widget {
     autostart_row.set_activatable_widget(Some(&autostart_switch));
     group.add(&autostart_row);
 
+    // "Vis tray-ikon" (owner-requested 2026-11): tjek pid-fil for jotta-tray;
+    // genstart hvis den ikke kører. På GNOME: hint om AppIndicator-udvidelsen.
+    let tray_row = adw::ActionRow::builder()
+        .title("Vis tray-ikon")
+        .subtitle("Tjekker om jotta-tray kører — starter den igen hvis ikke")
+        .build();
+    let tray_btn = gtk::Button::with_label("Vis tray-ikon");
+    tray_btn.set_valign(gtk::Align::Center);
+    tray_row.add_suffix(&tray_btn);
+    tray_row.set_activatable_widget(Some(&tray_btn));
+    group.add(&tray_row);
+    {
+        let toast_tx = toast_tx.clone();
+        tray_btn.connect_clicked(move |_| {
+            let toast_tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                let msg = match std::env::var("XDG_RUNTIME_DIR") {
+                    Ok(dir) => {
+                        let pid_file = std::path::PathBuf::from(&dir).join("jotta-tray.pid");
+                        let running = std::fs::read_to_string(&pid_file)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u32>().ok())
+                            .map(|pid| (pid, std::path::Path::new(&format!("/proc/{pid}")).exists()));
+                        match running {
+                            Some((pid, true)) => {
+                                let mut msg = format!("Tray-ikonet kører allerede (pid {pid})");
+                                if std::env::var("XDG_CURRENT_DESKTOP")
+                                    .map(|d| d.to_uppercase().contains("GNOME"))
+                                    .unwrap_or(false)
+                                {
+                                    msg.push_str(" — på GNOME skal AppIndicator-udvidelsen være aktiv for at se ikonet");
+                                }
+                                msg
+                            }
+                            _ => respawn_tray(),
+                        }
+                    }
+                    Err(_) => "XDG_RUNTIME_DIR er ikke sat — kan ikke tjekke tray".to_string(),
+                };
+                let _ = toast_tx.send(msg);
+            });
+        });
+    }
+
+    // Avanceret (iteration 12): jottad config-værdier. Læses via `jotta-cli config`
+    // (key : value-linjer) på worker-tråd; gemmes via `config set <key> <value>`.
+    let adv_group = adw::PreferencesGroup::builder()
+        .title("Avanceret")
+        .description("jottad-indstillinger — tomme felter ændres ikke ved gem")
+        .build();
+    let up_row = adw::EntryRow::builder().title("Båndbredde op (uploadrate)").build();
+    let down_row = adw::EntryRow::builder().title("Båndbredde ned (downloadrate)").build();
+    let scan_row = adw::EntryRow::builder()
+        .title("Scan-interval (scaninterval — 0 = realtime)")
+        .build();
+    adv_group.add(&up_row);
+    adv_group.add(&down_row);
+    adv_group.add(&scan_row);
+    let save_row = adw::ActionRow::builder()
+        .title("Gem avancerede indstillinger")
+        .build();
+    let save_btn = gtk::Button::with_label("Gem");
+    save_btn.add_css_class("suggested-action");
+    save_btn.set_valign(gtk::Align::Center);
+    save_row.add_suffix(&save_btn);
+    save_row.set_activatable_widget(Some(&save_btn));
+    adv_group.add(&save_row);
+
+    // Hent nuværende værdier én gang (worker -> kanal -> main loop).
+    {
+        let (cfg_tx, cfg_rx) = std::sync::mpsc::channel::<Vec<(String, String)>>();
+        let cfg_rx = Arc::new(Mutex::new(cfg_rx));
+        std::thread::spawn(move || {
+            let v = BinaryLocator::from_path()
+                .ok()
+                .and_then(|loc| CliClient::new(loc).run_text(&JottaCommand::ConfigList).ok())
+                .map(|t| jotta_core::cli::parse_config_lines(&t))
+                .unwrap_or_default();
+            let _ = cfg_tx.send(v);
+        });
+        let up2 = up_row.clone();
+        let down2 = down_row.clone();
+        let scan2 = scan_row.clone();
+        glib::idle_add_local(move || {
+            let rx = cfg_rx.lock().unwrap();
+            match rx.try_recv() {
+                Ok(v) => {
+                    let get = |k: &str| v.iter().find(|(key, _)| key == k).map(|(_, val)| val.clone());
+                    if let Some(val) = get("uploadrate") {
+                        up2.set_text(&val);
+                    }
+                    if let Some(val) = get("downloadrate") {
+                        down2.set_text(&val);
+                    }
+                    if let Some(val) = get("scaninterval") {
+                        scan2.set_text(&val);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+    }
+
+    // Gem: kør `config set` pr. ikke-tomt felt på worker-tråd. Ikke-destruktiv.
+    {
+        let toast_tx = toast_tx.clone();
+        save_btn.connect_clicked(move |_| {
+            let up = up_row.text().trim().to_string();
+            let down = down_row.text().trim().to_string();
+            let scan = scan_row.text().trim().to_string();
+            let toast_tx = toast_tx.clone();
+            std::thread::spawn(move || {
+                if let Some(loc) = BinaryLocator::from_path() {
+                    let client = CliClient::new(loc);
+                    let mut ok = true;
+                    for (k, v) in [("uploadrate", up), ("downloadrate", down), ("scaninterval", scan)] {
+                        if !v.is_empty() {
+                            if let Err(e) = client.run(&JottaCommand::ConfigSet { key: k.into(), value: v }) {
+                                eprintln!("jotta-gui: config set {k}: {e}");
+                                ok = false;
+                            }
+                        }
+                    }
+                    let _ = toast_tx.send(if ok {
+                        "Avancerede indstillinger gemt".to_string()
+                    } else {
+                        "Nogle indstillinger kunne ikke gemmes (se log)".to_string()
+                    });
+                }
+            });
+        });
+    }
+
     let box_widget = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&box_widget, 12);
     box_widget.append(&group);
+    box_widget.append(&adv_group);
     scrollable_page(&box_widget.upcast()).upcast()
+}
+
+/// Genstart jotta-tray: led efter binaren ved siden af eget exe, så i PATH.
+/// Returnerer en besked til toast. Kun vores egen binær, ingen shell-strenge.
+fn respawn_tray() -> String {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("jotta-tray"));
+        }
+    }
+    if let Ok(paths) = std::env::var("PATH") {
+        for p in std::env::split_paths(&paths) {
+            candidates.push(p.join("jotta-tray"));
+        }
+    }
+    match candidates.into_iter().find(|p| p.is_file()) {
+        Some(bin) => match std::process::Command::new(&bin).spawn() {
+            Ok(_) => format!("jotta-tray startet igen ({})", bin.display()),
+            Err(e) => format!("Kunne ikke starte jotta-tray: {e}"),
+        },
+        None => "jotta-tray-binaren blev ikke fundet (tjek PATH)".to_string(),
+    }
 }
 
 /// Parse `jotta-cli ignores list --json` output (backup ignores).
