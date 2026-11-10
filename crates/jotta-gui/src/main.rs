@@ -1927,6 +1927,104 @@ fn set_row_value(row: &adw::ActionRow, value: &str) {
     row.set_subtitle(value);
 }
 
+/// Sti til GUI'ens settings.conf (~/.config/jotta-desktop/settings.conf).
+fn settings_conf_path() -> std::path::PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("jotta-desktop")
+        .join("settings.conf")
+}
+
+/// Læs en `key=true|false`-værdi fra settings.conf.
+fn read_bool_setting(path: &std::path::Path, key: &str) -> Option<bool> {
+    let want_true = format!("{key}=true");
+    let want_false = format!("{key}=false");
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .map(str::trim_end)
+        .find(|l| *l == want_true || *l == want_false)
+        .map(|l| l == want_true)
+}
+
+/// Skriv en `key=true|false`-værdi — read-modify-write, bevarer andre nøgler.
+fn write_bool_setting(path: &std::path::Path, key: &str, value: bool) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let prefix = format!("{key}=");
+    let mut lines: Vec<String> = std::fs::read_to_string(path)
+        .ok()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_end().starts_with(&prefix))
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(format!("{prefix}{value}"));
+    let _ = std::fs::write(path, format!("{}\n", lines.join("\n")));
+}
+
+/// Er <pid> vores egen jotta-tray-proces? Sikkerhed før kill — aldrig en
+/// fremmed proces, og aldrig jottad.
+fn tray_pid_matches(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .map(|c| c.contains("jotta-tray"))
+        .unwrap_or(false)
+}
+
+/// Slå tray-ikon til/fra NU og ved fremtidige login (XDG user-override med
+/// Hidden=true — overskriver /etc/xdg/autostart uden at røre den).
+/// Returnerer besked til toast.
+fn set_tray_visibility(visible: bool) -> String {
+    let autostart_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(".config")
+        })
+        .join("autostart");
+    let override_file = autostart_dir.join("jotta-tray.desktop");
+    if visible {
+        let _ = std::fs::remove_file(&override_file);
+    } else if let Some(parent) = override_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        let _ = std::fs::write(
+            &override_file,
+            "[Desktop Entry]\nType=Application\nHidden=true\n",
+        );
+    }
+    let pid_file = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .map(|d| std::path::PathBuf::from(d).join("jotta-tray.pid"));
+    let running = pid_file
+        .as_ref()
+        .and_then(|pf| std::fs::read_to_string(pf).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|pid| tray_pid_matches(*pid));
+    match (visible, running) {
+        (true, Some(pid)) => format!("Tray-ikonet kører allerede (pid {pid})"),
+        (true, None) => respawn_tray(),
+        (false, Some(pid)) => {
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            "Tray-ikon skjult".to_string()
+        }
+        (false, None) => "Tray-ikon var allerede skjult".to_string(),
+    }
+}
+
 /// Byg Indstillinger-siden: minimize-to-tray, start ved login, vis tray-ikon,
 /// avancerede jottad-indstillinger (uploadrate/downloadrate/scaninterval).
 fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget {
@@ -1943,37 +2041,11 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     let mtt_switch = gtk::Switch::new();
     mtt_switch.set_valign(gtk::Align::Center);
     // Læs nuværende værdi fra konfigurationsfil
-    let config_path = std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".config")
-        })
-        .join("jotta-desktop")
-        .join("settings.conf");
-    let mtt_enabled = std::fs::read_to_string(&config_path)
-        .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("minimize_to_tray=")).map(|l| l.trim_end() == "minimize_to_tray=true"))
-        .unwrap_or(true); // Standard: AKTIV
+    let config_path = settings_conf_path();
+    let mtt_enabled = read_bool_setting(&config_path, "minimize_to_tray").unwrap_or(true); // Standard: AKTIV
     mtt_switch.set_active(mtt_enabled);
     mtt_switch.connect_state_set(move |sw, state| {
-        let config_path = std::env::var("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(".config")
-            })
-            .join("jotta-desktop")
-            .join("settings.conf");
-        if let Some(parent) = config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let content = format!("minimize_to_tray={}\n", state);
-        let _ = std::fs::write(&config_path, content);
+        write_bool_setting(&settings_conf_path(), "minimize_to_tray", state);
         sw.set_active(state);
         Propagation::Proceed
     });
@@ -2039,47 +2111,38 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     autostart_row.set_activatable_widget(Some(&autostart_switch));
     group.add(&autostart_row);
 
-    // "Vis tray-ikon" (owner-requested 2026-11): tjek pid-fil for jotta-tray;
-    // genstart hvis den ikke kører. På GNOME: hint om AppIndicator-udvidelsen.
+    // Tray-ikon som TOGGLE (owner-requested 2026-11, iteration 12): ON = kører
+    // (genstart hvis nede); OFF = skjules nu OG ved fremtidige login
+    // (XDG user-override Hidden=true + tray_visible i settings.conf).
+    // Kun vores egen proces dræbes (verificeret via /proc/<pid>/cmdline).
     let tray_row = adw::ActionRow::builder()
-        .title("Vis tray-ikon")
-        .subtitle("Tjekker om jotta-tray kører — starter den igen hvis ikke")
+        .title("Tray-ikon")
+        .subtitle("Vis ikonet i systembakken — slå fra for at skjule det")
         .build();
-    let tray_btn = gtk::Button::with_label("Vis tray-ikon");
-    tray_btn.set_valign(gtk::Align::Center);
-    tray_row.add_suffix(&tray_btn);
-    tray_row.set_activatable_widget(Some(&tray_btn));
+    let tray_switch = gtk::Switch::new();
+    tray_switch.set_valign(gtk::Align::Center);
+    let tray_visible = read_bool_setting(&config_path, "tray_visible").unwrap_or(true);
+    tray_switch.set_active(tray_visible);
+    tray_row.add_suffix(&tray_switch);
+    tray_row.set_activatable_widget(Some(&tray_switch));
     group.add(&tray_row);
+    // Ved opstart: hvis pref er FRA, sørg for at tray heller ikke kører nu.
+    if !tray_visible {
+        std::thread::spawn(|| {
+            let _ = set_tray_visibility(false);
+        });
+    }
     {
         let toast_tx = toast_tx.clone();
-        tray_btn.connect_clicked(move |_| {
+        tray_switch.connect_state_set(move |sw, state| {
+            write_bool_setting(&settings_conf_path(), "tray_visible", state);
             let toast_tx = toast_tx.clone();
             std::thread::spawn(move || {
-                let msg = match std::env::var("XDG_RUNTIME_DIR") {
-                    Ok(dir) => {
-                        let pid_file = std::path::PathBuf::from(&dir).join("jotta-tray.pid");
-                        let running = std::fs::read_to_string(&pid_file)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<u32>().ok())
-                            .map(|pid| (pid, std::path::Path::new(&format!("/proc/{pid}")).exists()));
-                        match running {
-                            Some((pid, true)) => {
-                                let mut msg = format!("Tray-ikonet kører allerede (pid {pid})");
-                                if std::env::var("XDG_CURRENT_DESKTOP")
-                                    .map(|d| d.to_uppercase().contains("GNOME"))
-                                    .unwrap_or(false)
-                                {
-                                    msg.push_str(" — på GNOME skal AppIndicator-udvidelsen være aktiv for at se ikonet");
-                                }
-                                msg
-                            }
-                            _ => respawn_tray(),
-                        }
-                    }
-                    Err(_) => "XDG_RUNTIME_DIR er ikke sat — kan ikke tjekke tray".to_string(),
-                };
+                let msg = set_tray_visibility(state);
                 let _ = toast_tx.send(msg);
             });
+            sw.set_active(state);
+            Propagation::Proceed
         });
     }
 
