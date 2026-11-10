@@ -282,8 +282,8 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // Sync selective is NOT destructive (unlike backup ignores): ignored
     // folders are not deleted locally or in the cloud. No confirmation dialog.
     let sync_title_row = adw::ActionRow::builder()
-        .title("Automatisk sync")
-        .subtitle("Synkroniserer mappen mellem dine enheder")
+        .title("Kontinuerlig sync")
+        .subtitle("ON = synkroniserer løbende mellem dine enheder; OFF = manuel tilstand")
         .build();
     let sync_path_row = adw::ActionRow::builder()
         .title("Sync-mappe")
@@ -293,6 +293,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         .title("Filer i sync")
         .subtitle("—")
         .build();
+    let sync_mode_row = adw::ActionRow::builder()
+        .title("Tilstand")
+        .subtitle("—")
+        .build();
     let sync_switch = gtk::Switch::new();
     sync_switch.set_valign(gtk::Align::Center);
     sync_title_row.add_suffix(&sync_switch);
@@ -300,6 +304,19 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     sync_group.add(&sync_title_row);
     sync_group.add(&sync_path_row);
     sync_group.add(&sync_count_row);
+    sync_group.add(&sync_mode_row);
+    // "Synkroniser nu" — kører én sync nu (`sync trigger`); knappen er kun
+    // aktiv i manuel tilstand (kontinuerlig sync kører jo allerede).
+    let sync_trigger_row = adw::ActionRow::builder()
+        .title("Synkroniser nu")
+        .subtitle("Kører én sync-kørsel med det samme (manuel tilstand)")
+        .build();
+    let sync_trigger_btn = gtk::Button::with_label("Synkroniser nu");
+    sync_trigger_btn.set_valign(gtk::Align::Center);
+    sync_trigger_btn.set_sensitive(false);
+    sync_trigger_row.add_suffix(&sync_trigger_btn);
+    sync_trigger_row.set_activatable_widget(Some(&sync_trigger_btn));
+    sync_group.add(&sync_trigger_row);
     // "Vælg mapper at synkronisere" — chevron-ikon for tydelighed (åbner dialog).
     let sync_selective_btn = gtk::Button::from_icon_name("go-next-symbolic");
     sync_selective_btn.add_css_class("flat");
@@ -580,8 +597,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         });
     }
 
-    // Sync switch: ON = sync running (SyncStart), OFF = stopped (SyncStop).
-    // Destructive: stopping sync is confirmed (safety rule 3).
+    // Sync switch: ON = kontinuerlig sync (SyncStart), OFF = manuel tilstand
+    // (SyncStop). "Stop" bekræftes (safety rule 3) — det ændrer tilstanden,
+    // men sletter ikke filer.
     {
         let window = window.clone();
         let sync_switch = sync_switch.clone();
@@ -594,11 +612,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             if !state {
                 // Turning OFF: confirm before stopping sync.
                 let dialog = adw::AlertDialog::new(
-                    Some("Stop sync?"),
-                    Some("Sync-mappen stopper med at synkronisere. Filer på denne enhed påvirkes ikke, men ændringer synkroniseres ikke længere, før du starter igen."),
+                    Some("Slå kontinuerlig sync fra?"),
+                    Some("Sync går over i manuel tilstand: ændringer synkroniseres først igen, når du trykker \"Synkroniser nu\" eller slår kontinuerlig sync til igen. Filer på denne enhed påvirkes ikke."),
                 );
                 dialog.add_response("cancel", "Annuller");
-                dialog.add_response("stop", "Stop sync");
+                dialog.add_response("stop", "Slå fra");
                 dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
                 dialog.set_default_response(Some("cancel"));
                 dialog.set_close_response("cancel");
@@ -619,6 +637,15 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             }
             run_cli(JottaCommand::SyncStart);
             Propagation::Proceed
+        });
+    }
+
+    // "Synkroniser nu": én manuel sync-kørsel (`sync trigger`). Ikke-destruktiv.
+    {
+        let toast_tx = toast_tx.clone();
+        sync_trigger_btn.connect_clicked(move |_| {
+            run_cli(JottaCommand::SyncTrigger);
+            let _ = toast_tx.send("Synkronisering trigget…".to_string());
         });
     }
 
@@ -1130,6 +1157,8 @@ Vil du erstatte den?",
         sync_updating: sync_updating.clone(),
         sync_path_row: sync_path_row.clone(),
         sync_count_row: sync_count_row.clone(),
+        sync_mode_row: sync_mode_row.clone(),
+        sync_trigger_btn: sync_trigger_btn.clone(),
         toast_tx: toast_tx.clone(),
         daemon_banner: daemon_banner.clone(),
         login_row: login_row.clone(),
@@ -1310,6 +1339,8 @@ struct StatusWidgets {
     sync_updating: std::rc::Rc<Cell<bool>>,
     sync_path_row: adw::ActionRow,
     sync_count_row: adw::ActionRow,
+    sync_mode_row: adw::ActionRow,
+    sync_trigger_btn: gtk::Button,
     toast_tx: std::sync::mpsc::Sender<String>,
     /// Banner vises når daemon ikke svarer (State::Offline).
     daemon_banner: adw::Banner,
@@ -1333,6 +1364,8 @@ impl Clone for StatusWidgets {
             sync_updating: self.sync_updating.clone(),
             sync_path_row: self.sync_path_row.clone(),
             sync_count_row: self.sync_count_row.clone(),
+            sync_mode_row: self.sync_mode_row.clone(),
+            sync_trigger_btn: self.sync_trigger_btn.clone(),
             toast_tx: self.toast_tx.clone(),
             daemon_banner: self.daemon_banner.clone(),
             login_row: self.login_row.clone(),
@@ -1403,30 +1436,40 @@ impl StatusWidgets {
         rebuild_backup_list(&self.backup_list, &status.backups, &self.toast_tx, &self.window);
 
         // Sync section — samme guard-mønster som pause switch.
-        let sync_active = status.sync.as_ref().map(|s| s.enabled).unwrap_or(false);
-        if let Some(sync) = &status.sync {
-            if self.sync_switch.is_active() != sync_active {
-                self.sync_updating.set(true);
-                self.sync_switch.set_active(sync_active);
-                self.sync_updating.set(false);
+        // Switchen = KONTINUERLIG tilstand (Sync.Automatic i JSON, svarer til
+        // "Mode" i tekst-status): ON = `sync start`, OFF = manuel tilstand.
+        let sync = status.sync.as_ref();
+        let sync_continuous = sync.map(|s| s.automatic).unwrap_or(false);
+        if self.sync_switch.is_active() != sync_continuous {
+            self.sync_updating.set(true);
+            self.sync_switch.set_active(sync_continuous);
+            self.sync_updating.set(false);
+        }
+        match sync {
+            Some(sync) => {
+                self.sync_path_row
+                    .set_subtitle(sync.root_path.as_deref().unwrap_or("—"));
+                let count_text = match (sync.files, sync.bytes) {
+                    (Some(f), Some(b)) => format!("{f} filer, {}", Status::format_bytes(b)),
+                    (Some(f), None) => format!("{f} filer"),
+                    _ => "—".to_string(),
+                };
+                self.sync_count_row.set_subtitle(&count_text);
+                self.sync_mode_row.set_subtitle(if sync.automatic {
+                    "Kontinuerlig"
+                } else {
+                    "Manuel (trigges med \"Synkroniser nu\")"
+                });
+                // `sync trigger` virker kun når kontinuerlig sync er FRA.
+                self.sync_trigger_btn
+                    .set_sensitive(sync.enabled && !sync.automatic);
             }
-            self.sync_path_row.set_subtitle(
-                sync.root_path.as_deref().unwrap_or("—"),
-            );
-            let count_text = match (sync.files, sync.bytes) {
-                (Some(f), Some(b)) => format!("{f} filer, {}", Status::format_bytes(b)),
-                (Some(f), None) => format!("{f} filer"),
-                _ => "—".to_string(),
-            };
-            self.sync_count_row.set_subtitle(&count_text);
-        } else {
-            if self.sync_switch.is_active() != sync_active {
-                self.sync_updating.set(true);
-                self.sync_switch.set_active(sync_active);
-                self.sync_updating.set(false);
+            None => {
+                self.sync_path_row.set_subtitle("Ingen sync konfigureret");
+                self.sync_count_row.set_subtitle("—");
+                self.sync_mode_row.set_subtitle("—");
+                self.sync_trigger_btn.set_sensitive(false);
             }
-            self.sync_path_row.set_subtitle("Ingen sync konfigureret");
-            self.sync_count_row.set_subtitle("—");
         }
     }
 }
