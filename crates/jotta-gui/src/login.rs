@@ -66,14 +66,14 @@ pub fn open_login_dialog(
     toast_tx: mpsc::Sender<String>,
 ) {
     let dialog = adw::Dialog::new();
-    dialog.set_title("Log ind på Jottacloud");
+    dialog.set_title(crate::i18n::t("login.dialog.title"));
     dialog.set_content_width(520);
 
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
-    let cancel_btn = gtk::Button::with_label("Annuller");
+    let cancel_btn = gtk::Button::with_label(crate::i18n::t("common.cancel"));
     header.pack_start(&cancel_btn);
-    let login_btn = gtk::Button::with_label("Log ind");
+    let login_btn = gtk::Button::with_label(crate::i18n::t("login.button"));
     login_btn.add_css_class("suggested-action");
     header.pack_end(&login_btn);
     toolbar.add_top_bar(&header);
@@ -81,24 +81,22 @@ pub fn open_login_dialog(
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
-    let info = gtk::Label::new(Some(
-        "Log ind med et personligt login-token. Generer tokenet under Security-fanen på jottacloud.com — tokenet er engangs og vises kun én gang.",
-    ));
+    let info = gtk::Label::new(Some(crate::i18n::t("login.info")));
     info.set_wrap(true);
     info.set_xalign(0.0);
     info.add_css_class("dim-label");
     content.append(&info);
 
     // Vilkår (checkbox skal være afkrydset før "Log ind" aktiveres).
-    let terms_group = adw::PreferencesGroup::builder().title("Vilkår").build();
+    let terms_group = adw::PreferencesGroup::builder().title(crate::i18n::t("login.terms.group")).build();
     let license_row = adw::ActionRow::builder()
-        .title("Jeg accepterer Jottaclouds betingelser")
+        .title(crate::i18n::t("login.terms.accept"))
         .build();
     let license_cb = gtk::CheckButton::new();
     license_row.add_suffix(&license_cb);
     license_row.set_activatable_widget(Some(&license_cb));
     terms_group.add(&license_row);
-    let terms_link_row = adw::ActionRow::builder().title("Vilkår").build();
+    let terms_link_row = adw::ActionRow::builder().title(crate::i18n::t("login.terms.group")).build();
     let terms_link = gtk::LinkButton::with_label(
         "https://jottacloud.com/en/terms.html",
         "jottacloud.com/en/terms.html",
@@ -109,14 +107,14 @@ pub fn open_login_dialog(
 
     // Token (maskeret felt).
     let token_group = adw::PreferencesGroup::builder()
-        .title("Login-token")
-        .description("Personligt login-token — engangs, genereres på jottacloud.com")
+        .title(crate::i18n::t("login.token.group"))
+        .description(crate::i18n::t("login.token.desc"))
         .build();
     let token_row = adw::PasswordEntryRow::builder()
-        .title("Personal login token")
+        .title(crate::i18n::t("login.token.placeholder"))
         .build();
     token_group.add(&token_row);
-    let secure_row = adw::ActionRow::builder().title("Generer token").build();
+    let secure_row = adw::ActionRow::builder().title(crate::i18n::t("login.secure.row")).build();
     let secure_link =
         gtk::LinkButton::with_label("https://www.jottacloud.com/web/secure", "jottacloud.com/web/secure");
     secure_row.add_suffix(&secure_link);
@@ -125,9 +123,9 @@ pub fn open_login_dialog(
 
     // Enhedsnavn (pre-udfyldt med hostname — må aldrig være tomt, ellers
     // re-prompter jotta-cli i en uendelig løkke ved EOF).
-    let device_group = adw::PreferencesGroup::builder().title("Denne enhed").build();
+    let device_group = adw::PreferencesGroup::builder().title(crate::i18n::t("login.device.group")).build();
     let device_row = adw::EntryRow::builder()
-        .title("Enhedsnavn")
+        .title(crate::i18n::t("login.device.row"))
         .text(&hostname())
         .build();
     device_group.add(&device_row);
@@ -188,7 +186,7 @@ pub fn open_login_dialog(
                 return;
             }
             btn.set_sensitive(false);
-            status_label.set_text("Kontakter jottad og logger ind…");
+            status_label.set_text(crate::i18n::t("login.contacting"));
 
             let (ev_tx, ev_rx) = mpsc::channel::<LoginEvent>();
             let ev_rx = Arc::new(Mutex::new(ev_rx));
@@ -206,25 +204,25 @@ pub fn open_login_dialog(
                 match rx.try_recv() {
                     Ok(LoginEvent::Prompt(step)) => {
                         status_label2.set_text(match step {
-                            LoginStep::License => "Accepterer vilkår…",
-                            LoginStep::Token => "Sender login-token…",
-                            LoginStep::DeviceName => "Registrerer enhed…",
+                            LoginStep::License => crate::i18n::t("login.step.license"),
+                            LoginStep::Token => crate::i18n::t("login.step.token"),
+                            LoginStep::DeviceName => crate::i18n::t("login.step.device"),
                         });
                     }
                     Ok(LoginEvent::Done) => {
                         dialog2.close();
-                        let _ = toast_tx2.send("Logget ind på Jottacloud".to_string());
+                        let _ = toast_tx2.send(crate::i18n::t("login.done.toast").to_string());
                         return glib::ControlFlow::Break;
                     }
                     Ok(LoginEvent::AlreadyLoggedIn) => {
                         dialog2.close();
-                        let _ = toast_tx2.send("Allerede logget ind — opdaterer status".to_string());
+                        let _ = toast_tx2.send(crate::i18n::t("login.already.toast").to_string());
                         return glib::ControlFlow::Break;
                     }
                     Ok(LoginEvent::Failed(msg)) => {
                         // Fallback: NeedsLogin-tilstanden forbliver, og
                         // dialogen viser fejlen + instruktionerne ovenfor.
-                        status_label2.set_text(&format!("Login fejlede: {msg}"));
+                        status_label2.set_text(&crate::tf!("login.failed", msg));
                         login_btn2.set_sensitive(true);
                         return glib::ControlFlow::Break;
                     }
@@ -308,7 +306,7 @@ fn run_login(locator: BinaryLocator, token: String, device: String, tx: mpsc::Se
         }
         if start.elapsed() > Duration::from_secs(90) {
             let _ = child.kill();
-            break LoginEvent::Failed("Login tog over 90 sekunder (timeout)".to_string());
+            break LoginEvent::Failed(crate::i18n::t("login.timeout").to_string());
         }
         match bytes_rx.recv_timeout(Duration::from_millis(100)) {
             Ok((true, bytes)) => {
@@ -338,7 +336,7 @@ fn run_login(locator: BinaryLocator, token: String, device: String, tx: mpsc::Se
             Err(mpsc::RecvTimeoutError::Disconnected) => match child.wait() {
                 Ok(status) => break classify(status, &err),
                 Err(_) => {
-                    break LoginEvent::Failed("kunne ikke vente på jotta-cli login".to_string())
+                    break LoginEvent::Failed(crate::i18n::t("login.wait.error").to_string());
                 }
             },
         }
@@ -358,8 +356,5 @@ fn classify(status: std::process::ExitStatus, err: &str) -> LoginEvent {
         // jotta-cli echoer ikke stdin, så stderr indeholder aldrig tokenet.
         return LoginEvent::Failed(err.trim().to_string());
     }
-    LoginEvent::Failed(format!(
-        "jotta-cli login afsluttede med kode {}",
-        status.code().unwrap_or(-1)
-    ))
+    LoginEvent::Failed(crate::tf!("login.exit.error", status.code().unwrap_or(-1)))
 }

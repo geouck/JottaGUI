@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[macro_use]
+mod i18n;
 mod login;
 
 /// Shared app state: latest parsed status + a channel to request refreshes.
@@ -245,18 +247,18 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
-    sidebar.append(&nav_item("Status", "io.github.eske.JottaDesktop-symbolic"));
-    sidebar.append(&nav_item("Backup", "folder-symbolic"));
-    sidebar.append(&nav_item("Sync", "folder-sync-symbolic"));
-    sidebar.append(&nav_item("Overførsler", "emblem-downloads-symbolic"));
-    sidebar.append(&nav_item("Gendan", "document-revert-symbolic"));
-    sidebar.append(&nav_item("Info", "dialog-information-symbolic"));
-    sidebar.append(&nav_item("Indstillinger", "emblem-system-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.status"), "io.github.eske.JottaDesktop-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.backup"), "folder-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.sync"), "folder-sync-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.transfers"), "emblem-downloads-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.restore"), "document-revert-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.info"), "dialog-information-symbolic"));
+    sidebar.append(&nav_item(i18n::t("nav.settings"), "emblem-system-symbolic"));
 
     let stack = gtk::Stack::new();
 
     // --- Status page widgets (kept in a struct so the poller can update them) ---
-    let status_state_label = gtk::Label::new(Some("Jottacloud: offline"));
+    let status_state_label = gtk::Label::new(Some(i18n::t("status.state.offline")));
     let status_email_label = gtk::Label::new(None);
     status_email_label.add_css_class("dim-label");
     let status_level = gtk::LevelBar::new();
@@ -270,8 +272,8 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // og status.paused er ofte None i JSON — så vi antager "kører".
     pause_switch.set_active(true);
     // Daemon-not-responding banner: vises når jottad ikke svarer (State::Offline).
-    let daemon_banner = adw::Banner::new("Jottacloud-daemonen svarer ikke");
-    daemon_banner.set_button_label(Some("Genindlæs"));
+    let daemon_banner = adw::Banner::new(i18n::t("status.daemon.banner"));
+    daemon_banner.set_button_label(Some(i18n::t("status.daemon.reload")));
     daemon_banner.set_revealed(false);
 
     // Login-række (iteration 11): synlig kun ved State::NeedsLogin.
@@ -279,10 +281,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // tre prompts programmatisk (licens, token, enhedsnavn) — tokenet går
     // kun over stdin, aldrig argv eller logs.
     let login_row = adw::ActionRow::builder()
-        .title("Log ind")
-        .subtitle("Forbind denne enhed med din Jottacloud-konto")
+        .title(i18n::t("status.login.title"))
+        .subtitle(i18n::t("status.login.subtitle"))
         .build();
-    let login_btn = gtk::Button::with_label("Log ind…");
+    let login_btn = gtk::Button::with_label(i18n::t("status.login.button"));
     login_btn.add_css_class("suggested-action");
     login_btn.set_valign(gtk::Align::Center);
     login_btn.set_visible(false);
@@ -302,10 +304,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // Synlig når logget ind; efter logout går status -> NeedsLogin, og
     // "Log ind"-rækken dukker op igen (skift bruger = log ud + log ind igen).
     let logout_row = adw::ActionRow::builder()
-        .title("Log ud")
-        .subtitle("Fjerner denne enheds login fra Jottacloud")
+        .title(i18n::t("status.logout.title"))
+        .subtitle(i18n::t("status.logout.subtitle"))
         .build();
-    let logout_btn = gtk::Button::with_label("Log ud");
+    let logout_btn = gtk::Button::with_label(i18n::t("status.logout.button"));
     logout_btn.add_css_class("destructive-action");
     logout_btn.set_valign(gtk::Align::Center);
     logout_btn.set_visible(false);
@@ -316,11 +318,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         let toast_tx = toast_tx.clone();
         logout_btn.connect_clicked(move |_| {
             let dialog = adw::AlertDialog::new(
-                Some("Log ud?"),
-                Some("Login fjernes fra denne enhed og backup/sync stopper. Filer i skyen påvirkes ikke. Du kan logge ind igen med et nyt token."),
+                Some(i18n::t("status.logout.confirm.title")),
+                Some(i18n::t("status.logout.confirm.body")),
             );
-            dialog.add_response("cancel", "Annuller");
-            dialog.add_response("logout", "Log ud");
+            dialog.add_response("cancel", i18n::t("common.cancel"));
+            dialog.add_response("logout", i18n::t("status.logout.button"));
             dialog.set_response_appearance("logout", adw::ResponseAppearance::Destructive);
             dialog.set_default_response(Some("cancel"));
             dialog.set_close_response("cancel");
@@ -328,7 +330,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |resp| {
                 if resp == "logout" {
                     run_cli(JottaCommand::Logout);
-                    let _ = toast_tx.send("Logger ud…".to_string());
+                    let _ = toast_tx.send(i18n::t("status.logout.toast").to_string());
                 }
             });
         });
@@ -344,31 +346,31 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &login_row,
         &logout_row,
     );
-    stack.add_titled(&status_page, Some("status"), "Status");
+    stack.add_titled(&status_page, Some("status"), i18n::t("nav.status"));
 
     // --- Backup page ---
     let backup_list = gtk::ListBox::new();
     backup_list.add_css_class("boxed-list");
     let backup_page = build_backup_page(&backup_list);
-    stack.add_titled(&backup_page, Some("backup"), "Backup");
+    stack.add_titled(&backup_page, Some("backup"), i18n::t("nav.backup"));
 
     // --- Sync page ---
     // Sync selective is NOT destructive (unlike backup ignores): ignored
     // folders are not deleted locally or in the cloud. No confirmation dialog.
     let sync_title_row = adw::ActionRow::builder()
-        .title("Kontinuerlig sync")
-        .subtitle("ON = synkroniserer løbende mellem dine enheder; OFF = manuel tilstand")
+        .title(i18n::t("sync.switch.title"))
+        .subtitle(i18n::t("sync.switch.subtitle"))
         .build();
     let sync_path_row = adw::ActionRow::builder()
-        .title("Sync-mappe")
+        .title(i18n::t("sync.path.title"))
         .subtitle("—")
         .build();
     let sync_count_row = adw::ActionRow::builder()
-        .title("Filer i sync")
+        .title(i18n::t("sync.files.title"))
         .subtitle("—")
         .build();
     let sync_mode_row = adw::ActionRow::builder()
-        .title("Tilstand")
+        .title(i18n::t("sync.mode.title"))
         .subtitle("—")
         .build();
     let sync_switch = gtk::Switch::new();
@@ -382,10 +384,10 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // "Synkroniser nu" — kører én sync nu (`sync trigger`); knappen er kun
     // aktiv i manuel tilstand (kontinuerlig sync kører jo allerede).
     let sync_trigger_row = adw::ActionRow::builder()
-        .title("Synkroniser nu")
-        .subtitle("Kører én sync-kørsel med det samme (manuel tilstand)")
+        .title(i18n::t("sync.trigger.title"))
+        .subtitle(i18n::t("sync.trigger.subtitle"))
         .build();
-    let sync_trigger_btn = gtk::Button::with_label("Synkroniser nu");
+    let sync_trigger_btn = gtk::Button::with_label(i18n::t("sync.trigger.button"));
     sync_trigger_btn.set_valign(gtk::Align::Center);
     sync_trigger_btn.set_sensitive(false);
     sync_trigger_row.add_suffix(&sync_trigger_btn);
@@ -394,15 +396,15 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // "Vælg mapper at synkronisere" — chevron-ikon for tydelighed (åbner dialog).
     let sync_selective_btn = gtk::Button::from_icon_name("go-next-symbolic");
     sync_selective_btn.add_css_class("flat");
-    sync_selective_btn.set_tooltip_text(Some("Vælg mapper at synkronisere…"));
+    sync_selective_btn.set_tooltip_text(Some(i18n::t("sync.selective.tooltip")));
     let sync_selective_row = adw::ActionRow::builder()
-        .title("Mappevalg")
-        .subtitle("Vælg hvilke top-level mapper der skal synkroniseres")
+        .title(i18n::t("sync.selective.page.title"))
+        .subtitle(i18n::t("sync.selective.page.subtitle"))
         .build();
     sync_selective_row.add_suffix(&sync_selective_btn);
     sync_group.add(&sync_selective_row);
     let sync_page = build_sync_page(&sync_group);
-    stack.add_titled(&sync_page, Some("sync"), "Sync");
+    stack.add_titled(&sync_page, Some("sync"), i18n::t("nav.sync"));
 
     // --- Overførsler (transfers) page: uploads + downloads + errors ---
     // Three sections: active uploads, active downloads, recent errors.
@@ -411,21 +413,21 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let transfers_uploads_list = gtk::ListBox::new();
     transfers_uploads_list.add_css_class("boxed-list");
     let transfers_uploads_group = adw::PreferencesGroup::builder()
-        .title("Aktive uploads")
+        .title(i18n::t("transfers.uploads.title"))
         .build();
     transfers_uploads_group.add(&transfers_uploads_list);
 
     let transfers_downloads_list = gtk::ListBox::new();
     transfers_downloads_list.add_css_class("boxed-list");
     let transfers_downloads_group = adw::PreferencesGroup::builder()
-        .title("Aktive downloads")
+        .title(i18n::t("transfers.downloads.title"))
         .build();
     transfers_downloads_group.add(&transfers_downloads_list);
 
     let transfers_errors_list = gtk::ListBox::new();
     transfers_errors_list.add_css_class("boxed-list");
     let transfers_errors_group = adw::PreferencesGroup::builder()
-        .title("Seneste fejl")
+        .title(i18n::t("transfers.errors.title"))
         .build();
     transfers_errors_group.add(&transfers_errors_list);
 
@@ -434,7 +436,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &transfers_downloads_group,
         &transfers_errors_group,
     );
-    stack.add_titled(&transfers_page, Some("transfers"), "Overførsler");
+    stack.add_titled(&transfers_page, Some("transfers"), i18n::t("nav.transfers"));
 
     // --- Gendan (restore/download) page ---
     // Remote browser for Backup/Archive/Sync + download dialog + downloads list.
@@ -445,11 +447,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     restore_path_label.set_wrap(true);
     let restore_path_up_btn = gtk::Button::from_icon_name("go-up-symbolic");
     restore_path_up_btn.add_css_class("flat");
-    restore_path_up_btn.set_tooltip_text(Some("En mappe op"));
+    restore_path_up_btn.set_tooltip_text(Some(i18n::t("restore.up.tooltip")));
     restore_path_up_btn.set_valign(gtk::Align::Center);
     let restore_refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
     restore_refresh_btn.add_css_class("flat");
-    restore_refresh_btn.set_tooltip_text(Some("Genindlæs"));
+    restore_refresh_btn.set_tooltip_text(Some(i18n::t("restore.refresh.tooltip")));
     restore_refresh_btn.set_valign(gtk::Align::Center);
     let restore_path_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     restore_path_box.append(&restore_path_up_btn);
@@ -465,11 +467,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     restore_scrolled.set_vexpand(true);
     restore_scrolled.set_min_content_height(200);
 
-    let restore_download_btn = gtk::Button::with_label("Download valgte…");
+    let restore_download_btn = gtk::Button::with_label(i18n::t("restore.download.button"));
     restore_download_btn.add_css_class("suggested-action");
     let restore_download_row = adw::ActionRow::builder()
-        .title("Download")
-        .subtitle("Hent valgte filer eller mapper til en lokal mappe")
+        .title(i18n::t("restore.download.dialog.title"))
+        .subtitle(i18n::t("restore.download.dialog.subtitle"))
         .build();
     restore_download_row.add_suffix(&restore_download_btn);
     let restore_group = adw::PreferencesGroup::new();
@@ -478,16 +480,16 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     let restore_downloads_list = gtk::ListBox::new();
     restore_downloads_list.add_css_class("boxed-list");
     let restore_downloads_group = adw::PreferencesGroup::builder()
-        .title("Overførsler")
+        .title(i18n::t("nav.transfers"))
         .build();
 
     // Trash: web-only (trash list has no --json, plain output unparseable).
     let restore_trash_web_btn = gtk::Button::from_icon_name("go-next-symbolic");
     restore_trash_web_btn.add_css_class("flat");
-    restore_trash_web_btn.set_tooltip_text(Some("Åbn papirkurv på jottacloud.com…"));
+    restore_trash_web_btn.set_tooltip_text(Some(i18n::t("restore.trash.tooltip")));
     let restore_trash_row = adw::ActionRow::builder()
-        .title("Papirkurv")
-        .subtitle("Gendan eller slet filer permanent på jottacloud.com (åbner i browser)")
+        .title(i18n::t("restore.trash.title"))
+        .subtitle(i18n::t("restore.trash.subtitle"))
         .build();
     restore_trash_row.add_suffix(&restore_trash_web_btn);
     let restore_trash_group = adw::PreferencesGroup::new();
@@ -501,28 +503,28 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         &restore_downloads_list,
         &restore_trash_group,
     );
-    stack.add_titled(&restore_page, Some("restore"), "Gendan");
+    stack.add_titled(&restore_page, Some("restore"), i18n::t("nav.restore"));
 
     // --- Info page: device, versions, subscription, account ---
     // Data from status --json (device, email, subscription) +
     // `jotta-cli version` on a worker thread (covers both jottad + jotta-cli
     // since they share the same version number in practice).
-    let info_device_row = adw::ActionRow::builder().title("Enhed").build();
-    let info_email_row = adw::ActionRow::builder().title("E-mail").build();
-    let info_sub_row = adw::ActionRow::builder().title("Abonnement").build();
-    let info_jotta_ver_row = adw::ActionRow::builder().title("Jottacloud version").build();
-    let info_app_ver_row = adw::ActionRow::builder().title("Jotta Desktop version").build();
-    let info_group = adw::PreferencesGroup::builder().title("System").build();
+    let info_device_row = adw::ActionRow::builder().title(i18n::t("info.device")).build();
+    let info_email_row = adw::ActionRow::builder().title(i18n::t("status.account.email")).build();
+    let info_sub_row = adw::ActionRow::builder().title(i18n::t("info.subscription")).build();
+    let info_jotta_ver_row = adw::ActionRow::builder().title(i18n::t("info.jotta.version")).build();
+    let info_app_ver_row = adw::ActionRow::builder().title(i18n::t("info.app.version")).build();
+    let info_group = adw::PreferencesGroup::builder().title(i18n::t("info.system.group")).build();
     info_group.add(&info_device_row);
     info_group.add(&info_email_row);
     info_group.add(&info_sub_row);
     info_group.add(&info_jotta_ver_row);
     info_group.add(&info_app_ver_row);
     let info_page = build_info_page(&info_group);
-    stack.add_titled(&info_page, Some("info"), "Info");
+    stack.add_titled(&info_page, Some("info"), i18n::t("nav.info"));
 
     let settings_page = build_settings_page(toast_tx.clone());
-    stack.add_titled(&settings_page, Some("settings"), "Indstillinger");
+    stack.add_titled(&settings_page, Some("settings"), i18n::t("nav.settings"));
 
     sidebar.connect_row_selected(clone!(
         #[strong]
@@ -584,7 +586,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     main_toolbar.set_content(Some(&stack));
 
     // NavigationPage wrapper så split_view stadig virker.
-    let content_page = adw::NavigationPage::new(&main_toolbar, "Status");
+    let content_page = adw::NavigationPage::new(&main_toolbar, i18n::t("nav.status"));
     split_view.set_content(Some(&content_page));
 
     // Dynamisk topbar titel: opdater NavigationPage titel når aktiv fane skifter.
@@ -595,13 +597,13 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             let title = stack
                 .visible_child_name()
                 .and_then(|name| match name.as_str() {
-                    "status" => Some("Status"),
-                    "backup" => Some("Backup"),
-                    "sync" => Some("Sync"),
-                    "transfers" => Some("Overførsler"),
-                    "restore" => Some("Gendan"),
-                    "info" => Some("Info"),
-                    "settings" => Some("Indstillinger"),
+                    "status" => Some(i18n::t("nav.status")),
+                    "backup" => Some(i18n::t("nav.backup")),
+                    "sync" => Some(i18n::t("nav.sync")),
+                    "transfers" => Some(i18n::t("nav.transfers")),
+                    "restore" => Some(i18n::t("nav.restore")),
+                    "info" => Some(i18n::t("nav.info")),
+                    "settings" => Some(i18n::t("nav.settings")),
                     _ => None,
                 })
                 .unwrap_or("Jotta Desktop");
@@ -663,7 +665,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                         if msg.contains("already running") {
                             return;
                         }
-                        let _ = toast_tx.send(format!("Kunne ikke ændre pause: {e}"));
+                        let _ = toast_tx.send(tf!("sync.pause.error", e));
                     }
                 }
             });
@@ -686,11 +688,11 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             if !state {
                 // Turning OFF: confirm before stopping sync.
                 let dialog = adw::AlertDialog::new(
-                    Some("Slå kontinuerlig sync fra?"),
-                    Some("Sync går over i manuel tilstand: ændringer synkroniseres først igen, når du trykker \"Synkroniser nu\" eller slår kontinuerlig sync til igen. Filer på denne enhed påvirkes ikke."),
+                    Some(i18n::t("sync.stop.confirm.title")),
+                    Some(i18n::t("sync.stop.confirm.body")),
                 );
-                dialog.add_response("cancel", "Annuller");
-                dialog.add_response("stop", "Slå fra");
+                dialog.add_response("cancel", i18n::t("common.cancel"));
+                dialog.add_response("stop", i18n::t("sync.stop.confirm.action"));
                 dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
                 dialog.set_default_response(Some("cancel"));
                 dialog.set_close_response("cancel");
@@ -719,12 +721,12 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         let toast_tx = toast_tx.clone();
         sync_trigger_btn.connect_clicked(move |_| {
             run_cli(JottaCommand::SyncTrigger);
-            let _ = toast_tx.send("Synkronisering trigget…".to_string());
+            let _ = toast_tx.send(i18n::t("sync.trigger.toast").to_string());
         });
     }
 
     // "Tilføj mappe" button → FileDialog → BackupAdd.
-    let add_btn = gtk::Button::with_label("Tilføj mappe…");
+    let add_btn = gtk::Button::with_label(i18n::t("backup.add.button"));
     add_btn.add_css_class("suggested-action");
     let toast_tx_add = toast_tx.clone();
     add_btn.connect_clicked(clone!(
@@ -732,16 +734,16 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         window,
         move |_| {
             let dialog = gtk::FileDialog::new();
-            dialog.set_title("Vælg mappe til backup");
+            dialog.set_title(i18n::t("backup.dialog.title"));
             dialog.set_modal(true);
-            dialog.set_accept_label(Some("Tilføj"));
+            dialog.set_accept_label(Some(i18n::t("backup.dialog.accept")));
             let toast_tx_add = toast_tx_add.clone();
             dialog.select_folder(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
                 match res {
                     Ok(file) => {
                         if let Some(path) = file.path() {
                             run_cli(JottaCommand::BackupAdd(path));
-                            let _ = toast_tx_add.send("Backup-mappe tilføjet".to_string());
+                            let _ = toast_tx_add.send(i18n::t("backup.added.toast").to_string());
                         }
                     }
                     Err(_) => {} // user cancelled
@@ -776,14 +778,14 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
     // No worker thread needed — this is static data applied directly.
     {
         let entries = [
-            ("Backup", "Enheder med backup"),
-            ("Archive", "Arkiverede filer"),
-            ("Sync", "Synkroniseret mappe"),
+            ("Backup", i18n::t("restore.devices")),
+            ("Archive", i18n::t("restore.archived")),
+            ("Sync", i18n::t("restore.synced")),
         ];
         for (name, desc) in entries {
             let row = adw::ActionRow::builder()
                 .title(name)
-                .subtitle(&format!("Mappe — {desc}"))
+                .subtitle(&tf!("restore.folder.desc", desc))
                 .build();
             let img = gtk::Image::from_icon_name("folder-symbolic");
             row.add_prefix(&img);
@@ -806,7 +808,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                     let subtitle = action_row.subtitle().unwrap_or_default();
                     *restore_selected.borrow_mut() = name;
                     // "Mappe —" prefix means directory; "Fil —" means file.
-                    restore_selected_is_dir.set(subtitle.starts_with("Mappe"));
+                    restore_selected_is_dir.set(subtitle.starts_with(i18n::t("restore.kind.folder")));
                 }
             } else {
                 restore_selected.borrow_mut().clear();
@@ -830,9 +832,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             if let Some(action_row) = row.downcast_ref::<adw::ActionRow>() {
                 let name = action_row.title().to_string();
                 let subtitle = action_row.subtitle().unwrap_or_default();
-                let is_dir = subtitle.starts_with("Mappe");
+                let is_dir = subtitle.starts_with(i18n::t("restore.kind.folder"));
                 // Ghost device: subtitle starts with "Offline enhed" — not navigable.
-                let is_ghost = subtitle.starts_with("Offline enhed");
+                let is_ghost = subtitle.starts_with(i18n::t("restore.kind.offline"));
                 if is_ghost {
                     return; // graceful: no navigation into dead devices
                 }
@@ -1029,7 +1031,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
         restore_download_btn.connect_clicked(move |_| {
             let selected = sel.borrow().clone();
             if selected.is_empty() {
-                let _ = toast_tx.send("Vælg en fil eller mappe først".to_string());
+                let _ = toast_tx.send(i18n::t("restore.select.first").to_string());
                 return;
             }
             let remote_path = if current_path.borrow().is_empty() {
@@ -1039,9 +1041,9 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
             };
             let is_dir = sel_is_dir.get();
             let dialog = gtk::FileDialog::new();
-            dialog.set_title("Vælg download-destination");
+            dialog.set_title(i18n::t("restore.dest.dialog.title"));
             dialog.set_modal(true);
-            dialog.set_accept_label(Some("Vælg"));
+            dialog.set_accept_label(Some(i18n::t("restore.dest.accept")));
             let window_cb = window.clone();
             let window_alert = window.clone();
             let toast_tx = toast_tx.clone();
@@ -1055,7 +1057,7 @@ fn build_ui(app: &adw::Application, shutdown: Arc<AtomicBool>) {
                             if !is_dir && dest_file.exists() {
                                 // Vis egen bekræftelsesdialog før kommandoen.
                                 let alert = adw::AlertDialog::new(
-                                    Some("Erstat eksisterende fil?"),
+                                    Some(i18n::t("restore.replace.confirm.title")),
                                     Some(&format!(
                                         "Filen „{selected}“ findes allerede i {}.
 
@@ -1063,8 +1065,8 @@ Vil du erstatte den?",
                                         dest.display()
                                     )),
                                 );
-                                alert.add_response("cancel", "Annuller");
-                                alert.add_response("replace", "Erstat");
+                                alert.add_response("cancel", i18n::t("common.cancel"));
+                                alert.add_response("replace", i18n::t("restore.replace.action"));
                                 alert.set_response_appearance(
                                     "replace",
                                     adw::ResponseAppearance::Destructive,
@@ -1173,8 +1175,8 @@ Vil du erstatte den?",
                     for err in &errors {
                         let key = format!("{}:{}", err.path.as_deref().unwrap_or(""), err.message);
                         if seen.insert(key) {
-                            let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
-                            let _ = toast_tx.send(format!("Overførselsfejl: {path_str} — {}", err.message));
+                            let path_str = err.path.as_deref().unwrap_or(i18n::t("transfer.unknown.path"));
+                            let _ = toast_tx.send(tf!("transfer.error.toast", path_str, err.message));
                         }
                     }
                 }
@@ -1210,7 +1212,7 @@ Vil du erstatte den?",
     {
         let toast_tx = toast_tx.clone();
         daemon_banner.connect_button_clicked(move |_| {
-            let _ = toast_tx.send("Genindlæser status…".to_string());
+            let _ = toast_tx.send(i18n::t("status.reload.toast").to_string());
         });
     }
 
@@ -1461,11 +1463,11 @@ impl StatusWidgets {
     fn apply(&self, status: &Status) {
         // State line
         let state_text = match status.state {
-            State::Offline => "Jottacloud: offline",
-            State::NeedsLogin => "Jottacloud: log ind påkrævet",
-            State::Paused => "Jottacloud: pauset",
-            State::Syncing => "Jottacloud: synkroniserer…",
-            State::Idle => "Jottacloud: oppe at køre",
+            State::Offline => i18n::t("status.state.offline"),
+            State::NeedsLogin => i18n::t("status.state.needslogin"),
+            State::Paused => i18n::t("status.state.paused"),
+            State::Syncing => i18n::t("status.state.syncing"),
+            State::Idle => i18n::t("status.state.idle"),
         };
         self.state_label.set_text(state_text);
 
@@ -1495,13 +1497,9 @@ impl StatusWidgets {
         if let (Some(used), Some(quota)) = (status.bytes_used, status.bytes_quota) {
             self.level.set_max_value(quota as f64);
             self.level.set_value(used as f64);
-            self.usage_label.set_text(&format!(
-                "{} af {} brugt",
-                Status::format_bytes(used),
-                Status::format_bytes(quota)
-            ));
+            self.usage_label.set_text(&tf!("status.usage.of", i18n::format_bytes(used), i18n::format_bytes(quota)));
         } else {
-            self.usage_label.set_text("Forbrug ikke tilgængeligt");
+            self.usage_label.set_text(i18n::t("status.usage.unavailable"));
         }
 
         // Pause switch — guard forhindrer feedback-loop:
@@ -1537,22 +1535,22 @@ impl StatusWidgets {
                 self.sync_path_row
                     .set_subtitle(sync.root_path.as_deref().unwrap_or("—"));
                 let count_text = match (sync.files, sync.bytes) {
-                    (Some(f), Some(b)) => format!("{f} filer, {}", Status::format_bytes(b)),
-                    (Some(f), None) => format!("{f} filer"),
+                    (Some(f), Some(b)) => tf!("backup.files.count", f, i18n::format_bytes(b)),
+                    (Some(f), None) => tf!("backup.files.only", f),
                     _ => "—".to_string(),
                 };
                 self.sync_count_row.set_subtitle(&count_text);
                 self.sync_mode_row.set_subtitle(if sync.automatic {
-                    "Kontinuerlig"
+                    i18n::t("sync.mode.continuous")
                 } else {
-                    "Manuel (trigges med \"Synkroniser nu\")"
+                    i18n::t("sync.mode.manual")
                 });
                 // `sync trigger` virker kun når kontinuerlig sync er FRA.
                 self.sync_trigger_btn
                     .set_sensitive(sync.enabled && !sync.automatic);
             }
             None => {
-                self.sync_path_row.set_subtitle("Ingen sync konfigureret");
+                self.sync_path_row.set_subtitle(i18n::t("sync.none"));
                 self.sync_count_row.set_subtitle("—");
                 self.sync_mode_row.set_subtitle("—");
                 self.sync_trigger_btn.set_sensitive(false);
@@ -1589,11 +1587,11 @@ fn start_download(
                 merge: false,
             }) {
                 Ok(_) => {
-                    let _ = toast_tx.send(format!("Download startet: {remote_path}"));
+                    let _ = toast_tx.send(tf!("download.started.toast", remote_path));
                 }
                 Err(e) => {
                     // Error::CommandFailed viser nu fuld argv: "`jotta-cli download ...` exited 1: ..."
-                    let _ = toast_tx.send(format!("Kunne ikke starte download: {e}"));
+                    let _ = toast_tx.send(tf!("download.start.error", e));
                 }
             }
         }
@@ -1612,21 +1610,16 @@ fn rebuild_backup_list(
     }
     if backups.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen backup-mapper endnu")
-            .subtitle("Tryk 'Tilføj mappe' for at begynde")
+            .title(i18n::t("backup.empty.title"))
+            .subtitle(i18n::t("backup.empty.subtitle"))
             .build();
         list.append(&row);
         return;
     }
     for b in backups {
         let subtitle = match (b.files, b.bytes) {
-            (Some(f), Some(bytes)) => format!(
-                "{} · {} filer · {}",
-                b.path,
-                f,
-                Status::format_bytes(bytes)
-            ),
-            (Some(f), None) => format!("{} · {} filer", b.path, f),
+            (Some(f), Some(bytes)) => tf!("backup.summary", b.path, f, i18n::format_bytes(bytes)),
+            (Some(f), None) => tf!("backup.summary.files", b.path, f),
             _ => b.path.clone(),
         };
         let row = adw::ActionRow::builder()
@@ -1638,7 +1631,7 @@ fn rebuild_backup_list(
         let exclude_btn = gtk::Button::from_icon_name("go-next-symbolic");
         exclude_btn.add_css_class("flat");
         exclude_btn.set_valign(gtk::Align::Center);
-        exclude_btn.set_tooltip_text(Some("Udeluk filer/mønstre fra denne backup…"));
+        exclude_btn.set_tooltip_text(Some(i18n::t("backup.exclude.tooltip")));
         let backup_name_ex = b.name.clone();
         let backup_path = b.path.clone();
         let toast_tx_ex = toast_tx.clone();
@@ -1652,24 +1645,24 @@ fn rebuild_backup_list(
         let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
         remove_btn.add_css_class("flat");
         remove_btn.set_valign(gtk::Align::Center);
-        remove_btn.set_tooltip_text(Some("Fjern denne backup-mappe"));
+        remove_btn.set_tooltip_text(Some(i18n::t("backup.remove.tooltip")));
         let backup_name = b.name.clone();
         let toast_tx = toast_tx.clone();
         let window = window.clone();
         remove_btn.connect_clicked(move |_| {
             let dialog = adw::AlertDialog::new(
-                Some(&format!("Fjern backup «{}»?", backup_name)),
-                Some("Backup-mappen fjernes fra Jottacloud-konfigurationen. Filerne på denne enhed påvirkes ikke, og de fjernes IKKE fra skyen — men de slettes ikke fra andre enheder heller. Vil du fortsætte?"),
+                Some(&tf!("backup.remove.confirm.title", backup_name)),
+                Some(i18n::t("backup.remove.confirm.body")),
             );
-            dialog.add_response("cancel", "Annuller");
-            dialog.add_response("remove", "Fjern backup");
+            dialog.add_response("cancel", i18n::t("common.cancel"));
+            dialog.add_response("remove", i18n::t("backup.remove.action"));
             dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
             let toast_tx = toast_tx.clone();
             let backup_name = backup_name.clone();
             dialog.choose(&window, None::<&gtk::gio::Cancellable>, move |res| {
                 if res.as_str() == "remove" {
                     run_cli(JottaCommand::BackupRemove(backup_name.clone()));
-                    let _ = toast_tx.send(format!("Backup «{}» fjernet", backup_name));
+                    let _ = toast_tx.send(tf!("backup.removed.toast", backup_name));
                 }
             });
         });
@@ -1711,15 +1704,15 @@ fn build_status_page(
     // Konto & status i et struktureret kort (PreferencesGroup).
     // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
     let account_group = adw::PreferencesGroup::builder()
-        .title("Konto")
+        .title(i18n::t("status.account.group"))
         .build();
     let state_row = adw::ActionRow::builder()
-        .title("Status")
+        .title(i18n::t("status.account.state"))
         .build();
     state_row.add_suffix(state_label);
     state_label.set_halign(gtk::Align::End);
     let email_row = adw::ActionRow::builder()
-        .title("E-mail")
+        .title(i18n::t("status.account.email"))
         .build();
     email_row.add_suffix(email_label);
     email_label.set_halign(gtk::Align::End);
@@ -1732,11 +1725,11 @@ fn build_status_page(
 
     // Pause/resume: positiv formulering — ON = automatisk aktiv.
     let pause_group = adw::PreferencesGroup::builder()
-        .title("Aktivitet")
+        .title(i18n::t("status.activity.group"))
         .build();
     let pause_row = adw::ActionRow::builder()
-        .title("Automatisk backup og sync")
-        .subtitle("Slå fra for midlertidigt at sætte al aktivitet på pause")
+        .title(i18n::t("status.pause.title"))
+        .subtitle(i18n::t("status.pause.subtitle"))
         .build();
     pause_row.add_suffix(pause_switch);
     pause_row.set_activatable_widget(Some(pause_switch));
@@ -1745,10 +1738,10 @@ fn build_status_page(
 
     // Lagerplads i egen indrammet gruppe.
     let usage_group = adw::PreferencesGroup::builder()
-        .title("Lagerplads")
+        .title(i18n::t("status.storage.group"))
         .build();
     let usage_row = adw::ActionRow::builder()
-        .title("Forbrug")
+        .title(i18n::t("status.usage.row"))
         .build();
     usage_row.add_suffix(usage_label);
     usage_label.set_halign(gtk::Align::End);
@@ -1821,17 +1814,17 @@ fn rebuild_uploads_list(
         .collect();
     if active.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen aktive uploads")
-            .subtitle("Uploads vises her når de kører")
+            .title(i18n::t("transfers.uploads.empty.title"))
+            .subtitle(i18n::t("transfers.uploads.empty.subtitle"))
             .build();
         list.append(&row);
         return;
     }
     for entry in active {
         let status_text = match entry.status {
-            jotta_core::remote::UploadStatus::Ongoing => "Uploader…",
-            jotta_core::remote::UploadStatus::Failed => "Fejlet",
-            jotta_core::remote::UploadStatus::Completed => "Færdig",
+            jotta_core::remote::UploadStatus::Ongoing => i18n::t("transfer.status.uploading"),
+            jotta_core::remote::UploadStatus::Failed => i18n::t("transfer.status.failed"),
+            jotta_core::remote::UploadStatus::Completed => i18n::t("transfer.status.done"),
         };
         // Kun filnavn i titel, fulde stier i undertitel.
         let file_name = entry
@@ -1864,17 +1857,17 @@ fn rebuild_transfers_downloads_list(
         .collect();
     if active.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen aktive downloads")
-            .subtitle("Downloads vises her når de kører")
+            .title(i18n::t("transfers.downloads.empty.title"))
+            .subtitle(i18n::t("transfers.downloads.empty.subtitle"))
             .build();
         list.append(&row);
         return;
     }
     for entry in active {
         let status_text = match entry.status {
-            jotta_core::remote::DownloadStatus::Ongoing => "Kører…",
-            jotta_core::remote::DownloadStatus::Failed => "Fejlet",
-            jotta_core::remote::DownloadStatus::Completed => "Færdig",
+            jotta_core::remote::DownloadStatus::Ongoing => i18n::t("transfer.status.downloading"),
+            jotta_core::remote::DownloadStatus::Failed => i18n::t("transfer.status.failed"),
+            jotta_core::remote::DownloadStatus::Completed => i18n::t("transfer.status.done"),
         };
         let file_name = entry
             .remote_path
@@ -1903,14 +1896,14 @@ fn rebuild_transfer_errors_list(
     }
     if errors.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen fejl")
-            .subtitle("Overførselsfejl vises her")
+            .title(i18n::t("transfers.errors.empty.title"))
+            .subtitle(i18n::t("transfers.errors.empty.subtitle"))
             .build();
         list.append(&row);
         return;
     }
     for err in errors {
-        let path_str = err.path.as_deref().unwrap_or("(ukendt sti)");
+        let path_str = err.path.as_deref().unwrap_or(i18n::t("transfer.unknown.path"));
         let file_name = path_str.rsplit('/').next().unwrap_or(path_str);
         let row = adw::ActionRow::builder()
             .title(file_name)
@@ -2077,7 +2070,7 @@ fn set_tray_visibility(visible: bool) -> String {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|pid| tray_pid_matches(*pid));
     match (visible, running) {
-        (true, Some(pid)) => format!("Tray-ikonet kører allerede (pid {pid})"),
+        (true, Some(pid)) => tf!("tray.already.running", pid),
         (true, None) => respawn_tray(),
         (false, Some(pid)) => {
             let _ = std::process::Command::new("kill")
@@ -2092,9 +2085,9 @@ fn set_tray_visibility(visible: bool) -> String {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             clear_stale_tray_pid();
-            "Tray-ikon skjult".to_string()
+            i18n::t("tray.hidden.toast").to_string()
         }
-        (false, None) => "Tray-ikon var allerede skjult".to_string(),
+        (false, None) => i18n::t("tray.already.hidden.toast").to_string(),
     }
 }
 
@@ -2102,14 +2095,14 @@ fn set_tray_visibility(visible: bool) -> String {
 /// avancerede jottad-indstillinger (uploadrate/downloadrate/scaninterval).
 fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget {
     let group = adw::PreferencesGroup::builder()
-        .title("Generelt")
+        .title(i18n::t("settings.general.group"))
         .build();
 
     // Minimize-to-tray: når aktiv, minimeres vinduet til tray ved luk i stedet
     // for at afslutte. Gemmes i en konfigurationsfil.
     let mtt_row = adw::ActionRow::builder()
-        .title("Minimer til systembakke ved luk")
-        .subtitle("Vinduet minimeres til systembakken i stedet for at lukke")
+        .title(i18n::t("settings.mtt.title"))
+        .subtitle(i18n::t("settings.mtt.subtitle"))
         .build();
     let mtt_switch = gtk::Switch::new();
     mtt_switch.set_valign(gtk::Align::Center);
@@ -2129,8 +2122,8 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     // Start ved login: skriver/fjerner XDG autostart .desktop for jotta-desktop.
     // (jotta-tray har allerede sin egen autostart — denne er for GUI'en.)
     let autostart_row = adw::ActionRow::builder()
-        .title("Start ved login")
-        .subtitle("Åbn Jotta Desktop automatisk når du logger ind")
+        .title(i18n::t("settings.autostart.title"))
+        .subtitle(i18n::t("settings.autostart.subtitle"))
         .build();
     let autostart_switch = gtk::Switch::new();
     autostart_switch.set_valign(gtk::Align::Center);
@@ -2189,8 +2182,8 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     // (XDG user-override Hidden=true + tray_visible i settings.conf).
     // Kun vores egen proces dræbes (verificeret via /proc/<pid>/cmdline).
     let tray_row = adw::ActionRow::builder()
-        .title("Tray-ikon")
-        .subtitle("Vis ikonet i systembakken — slå fra for at skjule det")
+        .title(i18n::t("settings.tray.title"))
+        .subtitle(i18n::t("settings.tray.subtitle"))
         .build();
     let tray_switch = gtk::Switch::new();
     tray_switch.set_valign(gtk::Align::Center);
@@ -2222,21 +2215,21 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
     // Avanceret (iteration 12): jottad config-værdier. Læses via `jotta-cli config`
     // (key : value-linjer) på worker-tråd; gemmes via `config set <key> <value>`.
     let adv_group = adw::PreferencesGroup::builder()
-        .title("Avanceret")
-        .description("jottad-indstillinger — tomme felter ændres ikke ved gem")
+        .title(i18n::t("settings.advanced.group"))
+        .description(i18n::t("settings.advanced.desc"))
         .build();
-    let up_row = adw::EntryRow::builder().title("Båndbredde op (uploadrate)").build();
-    let down_row = adw::EntryRow::builder().title("Båndbredde ned (downloadrate)").build();
+    let up_row = adw::EntryRow::builder().title(i18n::t("settings.bandwidth.up")).build();
+    let down_row = adw::EntryRow::builder().title(i18n::t("settings.bandwidth.down")).build();
     let scan_row = adw::EntryRow::builder()
-        .title("Scan-interval (scaninterval — 0 = realtime)")
+        .title(i18n::t("settings.scaninterval"))
         .build();
     adv_group.add(&up_row);
     adv_group.add(&down_row);
     adv_group.add(&scan_row);
     let save_row = adw::ActionRow::builder()
-        .title("Gem avancerede indstillinger")
+        .title(i18n::t("settings.save.advanced.title"))
         .build();
-    let save_btn = gtk::Button::with_label("Gem");
+    let save_btn = gtk::Button::with_label(i18n::t("settings.save.button"));
     save_btn.add_css_class("suggested-action");
     save_btn.set_valign(gtk::Align::Center);
     save_row.add_suffix(&save_btn);
@@ -2300,9 +2293,9 @@ fn build_settings_page(toast_tx: std::sync::mpsc::Sender<String>) -> gtk::Widget
                         }
                     }
                     let _ = toast_tx.send(if ok {
-                        "Avancerede indstillinger gemt".to_string()
+                        i18n::t("settings.saved.toast").to_string()
                     } else {
-                        "Nogle indstillinger kunne ikke gemmes (se log)".to_string()
+                        i18n::t("settings.save.error.toast").to_string()
                     });
                 }
             });
@@ -2340,11 +2333,11 @@ fn respawn_tray() -> String {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-                format!("jotta-tray startet igen ({})", bin.display())
+                tf!("tray.restarted.toast", bin.display())
             }
-            Err(e) => format!("Kunne ikke starte jotta-tray: {e}"),
+            Err(e) => tf!("tray.start.error", e),
         },
-        None => "jotta-tray-binaren blev ikke fundet (tjek PATH)".to_string(),
+        None => i18n::t("tray.not.found.toast").to_string(),
     }
 }
 
@@ -2449,7 +2442,7 @@ fn open_sync_selective_dialog(
         let sync_root = match sync_root {
             Some(r) => r,
             None => {
-                let _ = toast_tx.send("Ingen sync-mappe konfigureret".to_string());
+                let _ = toast_tx.send(i18n::t("sync.selective.nofolder.toast").to_string());
                 return;
             }
         };
@@ -2471,16 +2464,14 @@ fn build_sync_selective_dialog(
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
     let dialog = adw::Dialog::new();
-    dialog.set_title("Vælg mapper at synkronisere");
+    dialog.set_title(i18n::t("sync.selective.dialog.title"));
     dialog.set_content_width(420);
     dialog.set_content_height(480);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
-    let intro = gtk::Label::new(Some(&format!(
-        "Vælg hvilke mapper i {sync_root} der skal synkroniseres.\nAfkrydsede mapper synkroniseres. Fjernede afkrydsninger stopper sync for den mappe — filerne slettes ikke hverken lokalt eller i skyen."
-    )));
+    let intro = gtk::Label::new(Some(&tf!("sync.selective.dialog.body", sync_root)));
     intro.set_wrap(true);
     intro.set_xalign(0.0);
     intro.add_css_class("dim-label");
@@ -2491,8 +2482,8 @@ fn build_sync_selective_dialog(
     let mut checkboxes: Vec<(String, gtk::CheckButton)> = Vec::new();
     if all_folders.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen mapper i sync-mappen")
-            .subtitle("Tilføj mapper til sync-mappen for at kunne vælge dem her")
+            .title(i18n::t("sync.selective.empty.title"))
+            .subtitle(i18n::t("sync.selective.empty.subtitle"))
             .build();
         list_box.append(&row);
     }
@@ -2520,7 +2511,7 @@ fn build_sync_selective_dialog(
     header.set_show_end_title_buttons(true);
 
     let dialog_cancel = dialog.clone();
-    let cancel_btn = gtk::Button::with_label("Annuller");
+    let cancel_btn = gtk::Button::with_label(i18n::t("common.cancel"));
     cancel_btn.connect_clicked(move |_| {
         dialog_cancel.close();
     });
@@ -2529,7 +2520,7 @@ fn build_sync_selective_dialog(
     let dialog_apply = dialog.clone();
     let toast_tx = toast_tx.clone();
     let currently_ignored = currently_ignored.to_vec();
-    let apply_btn = gtk::Button::with_label("Anvend");
+    let apply_btn = gtk::Button::with_label(i18n::t("sync.selective.apply"));
     apply_btn.add_css_class("suggested-action");
     apply_btn.connect_clicked(move |_| {
         let mut to_add: Vec<String> = Vec::new();
@@ -2593,12 +2584,12 @@ fn build_sync_selective_dialog(
                 let msg = if errors.is_empty() {
                     let n = to_add.len() + to_remove.len();
                     if n == 0 {
-                        "Ingen ændringer".to_string()
+                        i18n::t("sync.selective.unchanged").to_string()
                     } else {
-                        format!("{n} mappevalg opdateret")
+                        tf!("sync.selective.updated", n)
                     }
                 } else {
-                    format!("Fejl: {}", errors.join(", "))
+                    tf!("sync.selective.error", errors.join(", "))
                 };
                 let _ = toast_tx.send(msg);
             }
@@ -2628,17 +2619,17 @@ fn open_backup_ignores_dialog(
     toast_tx: &std::sync::mpsc::Sender<String>,
 ) {
     let dialog = adw::Dialog::new();
-    dialog.set_title(&format!("Udeluk fra backup: {backup_name}"));
+    dialog.set_title(&tf!("backup.ignore.dialog.title", backup_name));
     dialog.set_content_width(480);
     dialog.set_content_height(520);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     set_margin_all(&content, 18);
 
-    let scope_model = gtk::StringList::new(&["Denne backup", "Alle backups"]);
+    let scope_model = gtk::StringList::new(&[i18n::t("backup.ignore.scope.this"), i18n::t("backup.ignore.scope.all")]);
     let scope_row = adw::ComboRow::builder()
-        .title("Anvend på")
-        .subtitle("Vælg hvilke backups mønsteret gælder for")
+        .title(i18n::t("backup.ignore.scope.label"))
+        .subtitle(i18n::t("backup.ignore.scope.subtitle"))
         .model(&scope_model)
         .selected(0)
         .build();
@@ -2647,7 +2638,7 @@ fn open_backup_ignores_dialog(
     content.append(&scope_group);
 
     let warning = gtk::Label::new(Some(
-        "Advarsel: Tilføjelse af et mønster fjerner allerede backup'ede filer der matcher mønsteret — de flyttes til papirkurven i Jottacloud.",
+        i18n::t("backup.ignore.warning"),
     ));
     warning.add_css_class("warning");
     warning.add_css_class("dim-label");
@@ -2656,17 +2647,17 @@ fn open_backup_ignores_dialog(
     content.append(&warning);
 
     let pattern_entry = adw::EntryRow::builder()
-        .title("Nyt mønster")
+        .title(i18n::t("backup.ignore.new.title"))
         .show_apply_button(true)
         .build();
     let entry_group = adw::PreferencesGroup::builder()
-        .title("Mønstre")
-        .description("Gitignore-syntaks, relativ til backup-roden (stien nedenfor). Eksempler: **.tmp, node_modules/, *.log")
+        .title(i18n::t("backup.ignore.patterns.title"))
+        .description(i18n::t("backup.ignore.patterns.desc"))
         .build();
     entry_group.add(&pattern_entry);
     content.append(&entry_group);
 
-    let path_label = gtk::Label::new(Some(&format!("Backup-rod: {backup_path}")));
+    let path_label = gtk::Label::new(Some(&tf!("backup.ignore.root", backup_path)));
     path_label.add_css_class("dim-label");
     path_label.set_xalign(0.0);
     path_label.set_wrap(true);
@@ -2728,18 +2719,19 @@ fn open_backup_ignores_dialog(
             None
         };
         let confirm = adw::AlertDialog::new(
-            Some("Tilføj udelukkelsesmønster?"),
-            Some(&format!(
-                "Mønsteret `{pattern}` tilføjes{}. Matcher mønsteret filer der allerede er backup'et, flyttes de til papirkurven i Jottacloud.",
+            Some(i18n::t("backup.ignore.add.confirm.title")),
+            Some(&tf!(
+                "backup.ignore.add.confirm.body",
+                pattern,
                 if backup.is_some() {
-                    format!(" for backup'en `{}`", backup_name2)
+                    tf!("backup.ignore.suffix.backup", backup_name2)
                 } else {
-                    " for ALLE backups".to_string()
+                    i18n::t("backup.ignore.suffix.all").to_string()
                 }
             )),
         );
-        confirm.add_response("cancel", "Annuller");
-        confirm.add_response("add", "Tilføj mønster");
+        confirm.add_response("cancel", i18n::t("common.cancel"));
+        confirm.add_response("add", i18n::t("backup.ignore.add.action"));
         confirm.set_response_appearance("add", adw::ResponseAppearance::Destructive);
         confirm.set_default_response(Some("cancel"));
         confirm.set_close_response("cancel");
@@ -2778,7 +2770,7 @@ fn open_backup_ignores_dialog(
                         let client = CliClient::new(loc);
                         match client.run(&JottaCommand::IgnoreAdd { pattern: pattern.clone(), backup: backup.clone() }) {
                             Ok(_) => {
-                                let _ = toast_tx.send(format!("Mønster tilføjet: {pattern}"));
+                                let _ = toast_tx.send(tf!("backup.ignore.added.toast", pattern));
                                 // FIX: Refresh skal følge samme scope som add.
                                 // "Denne backup" → Some(name), "Alle backups" → None.
                                 let refresh_scope = if backup.is_some() {
@@ -2792,7 +2784,7 @@ fn open_backup_ignores_dialog(
                                 }
                             }
                             Err(e) => {
-                                let _ = toast_tx.send(format!("Kunne ikke tilføje mønster: {e}"));
+                                let _ = toast_tx.send(tf!("backup.ignore.add.error", e));
                             }
                         }
                     }
@@ -2809,7 +2801,7 @@ fn open_backup_ignores_dialog(
     header.set_show_start_title_buttons(true);
     header.set_show_end_title_buttons(true);
     let dialog_close = dialog.clone();
-    let close_btn = gtk::Button::with_label("Luk");
+    let close_btn = gtk::Button::with_label(i18n::t("backup.ignore.close"));
     close_btn.connect_clicked(move |_| {
         dialog_close.close();
     });
@@ -2832,8 +2824,8 @@ fn rebuild_backup_ignores_list(
     }
     if patterns.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen udelukkelsesmønstre")
-            .subtitle("Tilføj et mønster ovenfor")
+            .title(i18n::t("backup.ignore.empty.title"))
+            .subtitle(i18n::t("backup.ignore.empty.subtitle"))
             .build();
         list.append(&row);
         return;
@@ -2843,20 +2835,18 @@ fn rebuild_backup_ignores_list(
         let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
         remove_btn.add_css_class("flat");
         remove_btn.set_valign(gtk::Align::Center);
-        remove_btn.set_tooltip_text(Some("Fjern mønster"));
+        remove_btn.set_tooltip_text(Some(i18n::t("backup.ignore.remove.tooltip")));
         let pattern = pattern.to_string();
         let backup_name = backup_name.to_string();
         let toast_tx_remove = toast_tx.clone();
         let list_remove = list.clone();
         remove_btn.connect_clicked(move |_| {
             let confirm = adw::AlertDialog::new(
-                Some("Fjern udelukkelsesmønster?"),
-                Some(&format!(
-                    "Mønsteret `{pattern}` fjernes for backup'en `{backup_name}`. Filer der matcher igen bliver backet up ved næste scan."
-                )),
+                Some(i18n::t("backup.ignore.remove.confirm.title")),
+                Some(&tf!("backup.ignore.remove.confirm.body", pattern, backup_name)),
             );
-            confirm.add_response("cancel", "Annuller");
-            confirm.add_response("remove", "Fjern");
+            confirm.add_response("cancel", i18n::t("common.cancel"));
+            confirm.add_response("remove", i18n::t("backup.ignore.remove.action"));
             confirm.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
             confirm.set_default_response(Some("cancel"));
             confirm.set_close_response("cancel");
@@ -2902,7 +2892,7 @@ fn rebuild_backup_ignores_list(
                                 let patterns = parse_ignores(&v);
                                 let _ = refresh_tx.send(patterns);
                             }
-                            let _ = toast_tx.send("Mønster fjernet".to_string());
+                            let _ = toast_tx.send(i18n::t("backup.ignore.removed.toast").to_string());
                         }
                     });
                 }
@@ -2938,7 +2928,7 @@ fn build_restore_page(
     // Ingen H1-overskrift — topbaren viser fanens navn dynamisk.
 
     // Remote browser section
-    let browser_title = gtk::Label::new(Some("Fjernfiler"));
+    let browser_title = gtk::Label::new(Some(i18n::t("restore.browser.title")));
     browser_title.set_halign(gtk::Align::Start);
     browser_title.add_css_class("heading");
     box_.append(&browser_title);
@@ -2949,14 +2939,14 @@ fn build_restore_page(
     box_.append(download_group);
 
     // Downloads section
-    let downloads_title = gtk::Label::new(Some("Overførsler"));
+    let downloads_title = gtk::Label::new(Some(i18n::t("nav.transfers")));
     downloads_title.set_halign(gtk::Align::Start);
     downloads_title.add_css_class("heading");
     downloads_group.add(downloads_list);
     box_.append(downloads_group);
 
     // Trash section (web-only — no list UI).
-    let trash_title = gtk::Label::new(Some("Papirkurv"));
+    let trash_title = gtk::Label::new(Some(i18n::t("restore.trash.title")));
     trash_title.set_halign(gtk::Align::Start);
     trash_title.add_css_class("heading");
     box_.append(&trash_title);
@@ -3001,14 +2991,14 @@ fn rebuild_remote_list_result(
     match result {
         LsNavResult::Root => {
             let entries = [
-                ("Backup", "Enheder med backup"),
-                ("Archive", "Arkiverede filer"),
-                ("Sync", "Synkroniseret mappe"),
+                ("Backup", i18n::t("restore.devices")),
+                ("Archive", i18n::t("restore.archived")),
+                ("Sync", i18n::t("restore.synced")),
             ];
             for (name, desc) in entries {
                 let row = adw::ActionRow::builder()
                     .title(name)
-                    .subtitle(&format!("Mappe — {desc}"))
+                    .subtitle(&tf!("restore.folder.desc", desc))
                     .build();
                 let img = gtk::Image::from_icon_name("folder-symbolic");
                 row.add_prefix(&img);
@@ -3019,20 +3009,20 @@ fn rebuild_remote_list_result(
         LsNavResult::Folders(entries) => {
             if entries.is_empty() {
                 let row = adw::ActionRow::builder()
-                    .title("(tom)")
-                    .subtitle("Denne mappe er tom")
+                    .title(i18n::t("restore.empty.title"))
+                    .subtitle(i18n::t("restore.empty.subtitle"))
                     .build();
                 list.append(&row);
                 return;
             }
             for entry in entries {
                 let subtitle = if entry.is_dir {
-                    "Mappe — dobbeltklik for at åbne".to_string()
+                    i18n::t("restore.folder.open.tooltip").to_string()
                 } else {
                     // Fil: vis størrelse hvis tilgængelig.
                     match entry.size {
-                        Some(s) => format!("Fil — {}", Status::format_bytes(s)),
-                        None => "Fil".to_string(),
+                        Some(s) => tf!("restore.file.size", i18n::format_bytes(s)),
+                        None => i18n::t("restore.file.plain").to_string(),
                     }
                 };
                 let icon = if entry.is_dir {
@@ -3054,19 +3044,19 @@ fn rebuild_remote_list_result(
             // File revisions — placeholder for future "gendan gammel version".
             if revs.is_empty() {
                 let row = adw::ActionRow::builder()
-                    .title("Ingen revisioner")
-                    .subtitle("Filen har ingen tidligere versioner")
+                    .title(i18n::t("restore.no.revisions.title"))
+                    .subtitle(i18n::t("restore.no.revisions.subtitle"))
                     .build();
                 list.append(&row);
                 return;
             }
             for rev in revs {
                 let subtitle = match rev.size {
-                    Some(s) => format!("Revision {} — {}", rev.id, Status::format_bytes(s)),
-                    None => format!("Revision {}", rev.id),
+                    Some(s) => tf!("restore.revision.size", rev.id, i18n::format_bytes(s)),
+                    None => tf!("restore.revision", rev.id),
                 };
                 let row = adw::ActionRow::builder()
-                    .title(&format!("Version {}", rev.id))
+                    .title(&tf!("restore.version", rev.id))
                     .subtitle(&subtitle)
                     .build();
                 let img = gtk::Image::from_icon_name("text-x-generic-symbolic");
@@ -3076,15 +3066,15 @@ fn rebuild_remote_list_result(
         }
         LsNavResult::Empty => {
             let row = adw::ActionRow::builder()
-                .title("(tom)")
-                .subtitle("Intet at vise")
+                .title(i18n::t("restore.empty.title"))
+                .subtitle(i18n::t("restore.empty.list.subtitle"))
                 .build();
             list.append(&row);
         }
         LsNavResult::Error(msg) => {
             // Graceful error — e.g. ghost device "Cannot find device".
             let row = adw::ActionRow::builder()
-                .title("Kunne ikke indlæse")
+                .title(i18n::t("restore.load.error"))
                 .subtitle(msg)
                 .build();
             row.add_css_class("error");
@@ -3105,17 +3095,17 @@ fn rebuild_downloads_list(
     }
     if entries.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Ingen overførsler")
-            .subtitle("Downloads og uploads vises her")
+            .title(i18n::t("restore.no.transfers.title"))
+            .subtitle(i18n::t("restore.no.transfers.subtitle"))
             .build();
         list.append(&row);
         return;
     }
     for entry in entries {
         let status_text = match entry.status {
-            jotta_core::remote::DownloadStatus::Ongoing => "Kører…",
-            jotta_core::remote::DownloadStatus::Failed => "Fejlet",
-            jotta_core::remote::DownloadStatus::Completed => "Færdig",
+            jotta_core::remote::DownloadStatus::Ongoing => i18n::t("transfer.status.downloading"),
+            jotta_core::remote::DownloadStatus::Failed => i18n::t("transfer.status.failed"),
+            jotta_core::remote::DownloadStatus::Completed => i18n::t("transfer.status.done"),
         };
         // Kun filnavn i titel, fulde stier i undertitel.
         let file_name = entry
@@ -3133,7 +3123,7 @@ fn rebuild_downloads_list(
         let abort_btn = gtk::Button::from_icon_name("process-stop-symbolic");
         abort_btn.add_css_class("flat");
         abort_btn.set_valign(gtk::Align::Center);
-        abort_btn.set_tooltip_text(Some("Annuller eller fjern fra liste"));
+        abort_btn.set_tooltip_text(Some(i18n::t("restore.abort.tooltip")));
         let id = entry.id.clone();
         abort_btn.connect_clicked(move |_| {
             run_cli(JottaCommand::DownloadAbort(id.clone()));
@@ -3145,7 +3135,7 @@ fn rebuild_downloads_list(
             let retry_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
             retry_btn.add_css_class("flat");
             retry_btn.set_valign(gtk::Align::Center);
-            retry_btn.set_tooltip_text(Some("Prøv igen"));
+            retry_btn.set_tooltip_text(Some(i18n::t("restore.retry.tooltip")));
             let id = entry.id.clone();
             retry_btn.connect_clicked(move |_| {
                 run_cli(JottaCommand::DownloadRetry(id.clone()));

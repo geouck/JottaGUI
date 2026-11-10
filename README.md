@@ -102,7 +102,7 @@ The tray icon switches between 5 named icons based on daemon status:
 | Needs login | `jotta-desktop-attention`  | Daemon up but not authenticated   |
 | Offline     | `jotta-desktop-offline`    | Daemon/socket not reachable       |
 
-## Status: iteration 9 complete (PR #13 merged as e749604)
+## Status: iteration 13 (i18n da/en) in progress — PR #19 draft; iterations 9–12 merged (PR #13, #15–#18)
 
 Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md` (§4 has the parity matrix).
 
@@ -148,6 +148,14 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
       file, `--device=dri`, host `jotta-cli`/`jottad` executed on the host via
       `flatpak-spawn --host` (Flatpak), OOM-safe build caps. Build + install + run
       verified on Fedora KDE. See `flatpak/README.md`.
+- [x] Graphical login (iteration 11, PR #15 + compile-fix PR #16): AdwDialog feeds
+      `jotta-cli login`'s 3 prompts via stdin pipe (empirically verified, also via
+      `flatpak-spawn --host`); token only in transient memory (AdwPasswordEntryRow);
+      NeedsLogin row stays as fallback
+- [x] Sync page: mode toggle (kontinuerlig vs manuel) + "Synkroniser nu" (PR #17)
+- [x] Polish (iteration 12, PR #18): "Log ud" with confirm dialog, "Vis tray-ikon"
+      toggle (`tray_visible`), Avanceret (uploadrate/downloadrate/scaninterval via
+      `jotta-cli config`), adaptive status poll (3 s active / 10 s idle)
 
 ### Next (per SPEC.md)
 
@@ -155,18 +163,20 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
       `jotta-cli`/`jottad` (repo.jotta.cloud) + SHA256, unpacked to `/app/extra`
       at install time (Flathub rejects host-dependent apps); mail
       support@jottacloud.com re: extra-data/bundling acceptance + logo rules
-- [ ] Graphical login (owner-approved decision change 23.10.2026, SPEC.md §2B):
-      feed `jotta-cli login`'s 3 prompts from the GUI (stdin-pipe or PTY) after the
-      owner's empirical transport test in a VM; prompt-matching + unit tests;
-      token never in argv/logs (AdwPasswordEntryRow, transient memory only);
-      NeedsLogin dialog stays as fallback
 - [ ] UI redesign 7→5 sidebar tabs (SPEC.md §3)
 
-### Later: i18n (da/en first, Danish stays default/fallback — SPEC.md §4)
+### i18n — DONE (iteration 13, PR #19 draft; SPEC.md §4)
 
-- [ ] Detect user language (LC_MESSAGES / LANG)
-- [ ] Translation catalog (gettext .po or Rust fluent/tr! macro)
-- [ ] jotta-core stays zero-dependency — i18n in jotta-gui + jotta-tray only
+- [x] Detect system locale (LC_MESSAGES → LC_ALL → LANG); "en*" → English,
+      everything else (incl. unset/C/POSIX) → Danish default/fallback — the UI
+      follows the desktop language automatically
+- [x] Built-in da/en catalog in pure Rust (no gettext dependency, no
+      `cargo-sources.json` churn): `crates/jotta-gui/src/i18n.rs` (~140 keys +
+      `tf!` macro for positional `{}` placeholders + locale-aware byte
+      formatting "1,58 GB"/"1.58 GB") and a small documented copy in
+      `crates/jotta-tray/src/i18n.rs` (menu labels + status line)
+- [x] jotta-core stays zero-dependency and untouched — the tray mirrors
+      `Status::tooltip()` locally in the detected language instead
 
 ### Even later
 
@@ -176,7 +186,10 @@ Product spec + feature-parity matrix: `jottagui-produkt-redesign-&-flathub-speci
 - [ ] Page consolidation (Status+Account, Status+Info)
 - [ ] Tray icon color (black/white, Nextcloud-style)
 - [ ] "Gendan gammel version" UI (revisions parsed, no UI yet)
-- [ ] KSNI menu enhancements (device list, activity)
+- [ ] KSNI menu enhancements (device list, activity, live up/down speed next to
+      the status line — owner request after PR #18; pause/resume is already there)
+- [ ] Notifications: stack or dynamically replace each other instead of a fixed
+      delay (owner observation after PR #18)
 - [ ] "Vis tray-ikon" button in Indstillinger (verify/respawn jotta-tray via PID
       file; AppIndicator hint on GNOME)
 - [ ] Snapshot/restore points

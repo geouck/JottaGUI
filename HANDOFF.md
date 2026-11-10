@@ -82,7 +82,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 - Switch guards: `pause_lockout` (AtomicBool, 15s after user click) prevents the poller from reverting the pause switch before jottad updates status. `pause_updating`/`sync_updating` (Rc<Cell<bool>>) prevent feedback loops from programmatic `set_active()`. RULE: only user action issues commands; the poller NEVER issues commands.
 - Pause switch truth: `status.paused != Some(true)` → ON (running). `None` (unknown) is treated as "running". Initial switch state is ON.
 
-## Current state (iteration 9 complete, PR #13 merged as e749604)
+## Current state (iteration 13 in progress — i18n; iterations 9–12 merged as PR #13, #15–#18)
 
 - jotta-core: 41 unit tests green (incl. 2 Flatpak tests: `host_view`/`host_spawn_prefix`). Zero dependencies. `BinaryLocator::from_path()` now also searches `$JOTTA_CLI`/`$JOTTAD` env overrides, the exe dir, `~/.jottacloud/bin`, `/run/host/usr/local/bin`, `/run/host/usr/bin`, `/usr/local/bin`, `/usr/bin` (jottad falls back to the sibling of jotta-cli). Inside a Flatpak, host binaries are executed ON THE HOST via `flatpak-spawn --host -- <path>` (`host_spawn_prefix()` wraps every `CliClient::run`), and `DaemonSupervisor::ensure_running()` spawns jottad detached on the host (`nohup … &`) — a sandbox-spawned daemon would die with the sandbox; the host systemd daemon is still reused via the socket check and never killed by us. JSON parser, CLI wrapper (`JottaCommand` enum + `argv()` whitelist), daemon supervisor (Model B), tolerant status model (incl. subscription/account_type), remote JSON parsers (`ls --json`, `list downloads --json`, `list uploads --json`), file revisions, download/upload entries, transfer errors (`collect_transfer_errors`).
 - jotta-tray: ksni StatusNotifierItem with embedded ARGB32 pixmap icons (5 states × 5 sizes). Menu: status, pause/resume (idempotent), "Åbn vindue", "Åbn jottacloud.com", "Afslut". Single-instance via PID file. Spawns GUI via `find_gui_binary()` + reaper thread. Click on icon (`activate()`) opens GUI. Reads minimize-to-tray setting from `~/.config/jotta-desktop/settings.conf`. **Stays alive when jottad stops** (Offline → Active, not Passive — iteration 8 fix).
@@ -104,7 +104,8 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 10. **Flathub self-contained via `extra-data`** (SPEC.md §2A — next iteration): Flathub rejects host-dependent apps, so pin the official `jotta-cli`/`jottad` (RPM repo `https://repo.jotta.cloud/redhat`, gpgkey `https://repo.jotta.cloud/jotta.gpg`) with URL + SHA256 as `extra-data`, unpacked to `/app/extra` at install time (Spotify/Discord model), run jottad as a sandbox child (Model B). Also mail support@jottacloud.com re: extra-data/bundling acceptance + logo/brand rules (SPEC.md §5).
 11. ~~**Graphical login**~~ ✅ DONE: PR #15 (e672c69) + compile-fix PR #16 (f0c8f7c) — branch `vibe/iteration11-login-9475a0` (empirisk transport-test DONE 2026-11 på Pop!_OS: stdin-pipe virker, også via `flatpak-spawn --host` — intet PTY). own iteration AFTER the owner's empirical transport test in a VM (`printf 'y\n<TOKEN>\n<DEVICE>\n' | jotta-cli login` and the same via `flatpak-spawn --host --` — stdin pipe suffices if it works; a real PTY is only clean after item 10 moves jotta-cli into the sandbox). Prompt state machine with unit tests; feeding code in jotta-gui only (jotta-core zero-dep); `JottaCommand::Login` argv `["login"]` already whitelisted; token never in argv/logs, AdwPasswordEntryRow, transient in memory; prompt-matching with fallback to the existing NeedsLogin dialog; handle "already logged in"; jottad must run first.
 12. **UI redesign 7→5 tabs** (SPEC.md §3): Status(Hjem)+live hastighed, Backup+schedule, Sync & Arkiv, Overførsler & Gendan, Indstillinger+Info+Konto+båndbredde.
-13. **i18n** (SPEC.md §4: da/en first, post-beta; Danish stays default/fallback): detect via LC_MESSAGES/LANG; translation catalog (gettext .po or fluent/tr!); jotta-core stays zero-dependency — i18n in jotta-gui/jotta-tray only.
+13. ~~**i18n**~~ ✅ DONE iteration 13 (PR #19 draft, branch `vibe/iteration13-i18n-9475a0`): SPEC.md §4 da/en first, Danish default/fallback. Built-in pure-Rust catalog (NO gettext dep — avoids regenerating flatpak cargo-sources.json): `crates/jotta-gui/src/i18n.rs` (~140 keys, `t(key)` + `tf!` macro for positional `{}` + locale-aware `format_bytes` 1,58/1.58 GB) and a small documented copy in `crates/jotta-tray/src/i18n.rs` (menu + status line). Locale detect: LC_MESSAGES → LC_ALL → LANG, "en*" → En, else Da — follows desktop language automatically (owner's English desktop gets English UI). jotta-core stays zero-dep/untouched: tray mirrors `Status::tooltip()` via local `status_line()` instead of the Danish core string. GUI: all UI literals in main.rs/login.rs now go through `i18n::t`/`tf!`; remote paths ("Backup"/"Archive"/"Sync"), config keys, icon names, css classes stay literal; `starts_with("Mappe")` checks now use `t("restore.kind.folder")` so they work in both languages. Sandbox-verified: i18n unit tests 7/7 + 3/3 via `rustc --test`, `cargo test -p jotta-core` 46/46, `cargo check -p jotta-tray` 0 warnings, gui files parse-clean via rustc (gtk crates unavailable in sandbox — owner MUST run `cargo check -p jotta-gui` = 0 errors 0 warnings on mobile).
+14. **Tray menu: live up/down speed** next to the status line (owner request after PR #18; pause/resume already in menu). Needs rates from `jotta-cli status --json` (State.Uploading/Downloading entries — check if they carry bytes/sec, else compute from byte counters deltas in the tray poller).
 
 ### Future features (owner-requested, roadmap additions 2026-06)
 
@@ -123,7 +124,8 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 
 ### Later
 
-- **i18n** (iteration 10, owner-requested 2026-06): multilingual support — detect user language via `LC_MESSAGES`/`LANG` env vars. Supported languages: **Norwegian (nb/nn), Swedish (sv), Danish (da), German (de), English (en)**. All UI strings currently hardcoded Danish. jotta-core stays zero-dependency — i18n lives in jotta-gui + jotta-tray only (gettext .po files or Rust `fluent`/`tr!` macro).
+- ~~**i18n**~~ ✅ iteration 13 (see roadmap item 13). Follow-ups if wanted: more languages (nb/nn, sv, de) — just add arms to the two `catalog()` matches; gettext .po extraction later if translators appear.
+- **Notifications stacking**: toasts currently have a fixed delay, so the latest change's notification waits for the previous one (owner observation after PR #18). Stack or dynamically replace notifications instead — likely a separate PR.
 - COPR + AUR packaging
 - "gendan gammel version" UI (revisions parsed but no UI yet)
 - KSNI menu enhancements (device list, activity)
@@ -146,7 +148,7 @@ Established during iteration 6o (UI polish, Gemini Argon review):
 
 ## Working agreement with the owner
 
-- Danish-speaking owner; UI strings so far are Danish - keep UI Danish for now, add proper i18n later.
+- Danish-speaking owner; UI was hardcoded Danish until iteration 13, which landed built-in da/en i18n (Danish default/fallback, English when the system locale is en*) — UI now follows the desktop language automatically.
 - Discuss architectural changes before making them.
 - One iteration = compiles + tests + a short summary of what changed.
 
@@ -162,15 +164,16 @@ Use this as the opening message when handing the project to a new agent:
 > safety rules, architecture decisions, process rules and a prioritized roadmap.
 > Also read `jottagui-produkt-redesign-&-flathub-specifikation-spec-md.md`
 > (SPEC.md: Flathub strategy, feature-parity matrix in §4, redesign plan).
-> The project is at iteration 9 (complete, PR #13 merged as e749604 — Flatpak
-> packaging works: build+install+run verified on Fedora KDE). Next milestone
-> is roadmap item 10: Flathub self-contained packaging via extra-data
-> (SPEC.md §2A — Flathub rejects host-dependent apps). Then item 11: graphical
-> login (owner-approved decision change 23.10.2026; wait for the owner's
-> empirical stdin/PTY test result before choosing the transport), item 12:
-> 7→5 tab redesign, item 13: i18n (da/en first, Danish stays default).
+> The project is at iteration 13 (i18n da/en — PR #19 draft on branch
+> `vibe/iteration13-i18n-9475a0`; iterations 9–12 merged as PR #13, #15–#18:
+> Flatpak packaging, graphical token login, sync mode toggle, polish/tray toggle).
+> Next milestone is roadmap item 10: Flathub self-contained packaging via
+> extra-data (SPEC.md §2A — Flathub rejects host-dependent apps). Then item 12:
+> 7→5 tab redesign, item 14: tray-menu up/down speed.
 > Never bypass the JottaCommand whitelist, never move sync folders, confirm
 > destructive operations, and keep jotta-core dependency-free.
 > `cargo check -p jotta-gui` MUST be 0 warnings before every push.
-> The owner speaks Danish — UI strings are Danish until i18n lands (roadmap item 13).
+> The owner speaks Danish — the UI is da/en since iteration 13 (Danish default,
+> English when system locale is en*); add new UI strings via `i18n::t`/`tf!` keys
+> in `crates/jotta-gui/src/i18n.rs` (and the tray copy for menu strings).
 > Report back with what compiles, what tests pass, and what you changed.
